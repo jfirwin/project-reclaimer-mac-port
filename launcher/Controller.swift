@@ -21,16 +21,26 @@ struct ControllerDevice: Identifiable, Equatable {
 @MainActor
 final class ControllerManager: ObservableObject {
     @Published var devices: [ControllerDevice] = []
-    @Published var selectedIndex: Int = 0 {
+    @Published var playerAssignments: [Int] = [0, 1, 2, 3]
+    @Published var selectedPlayerIndex: Int = 0 {
         didSet {
             loadActiveMapping()
             resetInputState()
         }
     }
+    @Published var pingingIndex: Int?
+
+    var currentDeviceIndex: Int {
+        if playerAssignments.indices.contains(selectedPlayerIndex) {
+            let devIdx = playerAssignments[selectedPlayerIndex]
+            if devices.indices.contains(devIdx) { return devIdx }
+        }
+        return devices.indices.contains(selectedPlayerIndex) ? selectedPlayerIndex : 0
+    }
 
     var currentDevice: ControllerDevice? {
-        guard devices.indices.contains(selectedIndex) else { return nil }
-        return devices[selectedIndex]
+        guard devices.indices.contains(currentDeviceIndex) else { return nil }
+        return devices[currentDeviceIndex]
     }
 
     // Live test states for the selected device
@@ -139,7 +149,6 @@ final class ControllerManager: ObservableObject {
             let usage = (IOHIDDeviceGetProperty(dev, "PrimaryUsage" as CFString) as? Int) ?? 0
             let rawName = (IOHIDDeviceGetProperty(dev, "Product" as CFString) as? String) ?? "Game Controller"
 
-            // Skip non-gamepads and internal Apple sensors
             guard vid > 0 && pid > 0, vid != 0x05AC, (usage == 5 || usage == 4 || vid == 0x2DC8 || vid == 0x057E) else {
                 continue
             }
@@ -152,7 +161,7 @@ final class ControllerManager: ObservableObject {
                 name = rawName.isEmpty ? "8BitDo Controller" : rawName
                 guid = "030022e4c82d00002f20000000010000"
                 is8B = true
-            } else if vid == 0x057E && pid == 0x2009 {
+            } else if vid == 0x057E {
                 name = "Nintendo Switch Pro Controller"
                 guid = "030000007e0500000920000000000000"
                 is8B = false
@@ -172,8 +181,13 @@ final class ControllerManager: ObservableObject {
         }
 
         self.devices = found
-        if selectedIndex >= found.count {
-            selectedIndex = max(0, found.count - 1)
+        var newAssignments: [Int] = []
+        for i in 0..<max(1, found.count) {
+            newAssignments.append(i < found.count ? i : 0)
+        }
+        self.playerAssignments = newAssignments
+        if selectedPlayerIndex >= found.count {
+            selectedPlayerIndex = max(0, found.count - 1)
         }
         loadActiveMapping()
     }
@@ -229,7 +243,7 @@ final class ControllerManager: ObservableObject {
         let elem = IOHIDValueGetElement(value)
         let senderDev = IOHIDElementGetDevice(elem)
 
-        // Only process events from the currently selected controller
+        // Only process events from the currently selected player's controller
         guard senderDev == current.device else { return }
 
         let page = IOHIDElementGetUsagePage(elem)
@@ -237,6 +251,63 @@ final class ControllerManager: ObservableObject {
         let intVal = IOHIDValueGetIntegerValue(value)
 
         Task { @MainActor in
+            // Handle Nintendo Switch Pro Controller Vendor-Defined Report (page 65281 / 0xFF01)
+            if page == 65281 && usage == 48 {
+                let len = IOHIDValueGetLength(value)
+                guard len >= 11 else { return }
+                let ptr = IOHIDValueGetBytePtr(value)
+                let b = Array(UnsafeBufferPointer(start: ptr, count: len))
+
+                let b2 = b[2]
+                let b3 = b[3]
+                let b4 = b[4]
+
+                // Switch buttons (0=A, 1=B, 2=X, 3=Y, etc.)
+                var newPressed = Set<Int>()
+                if (b2 & 0x08) != 0 { newPressed.insert(0) } // A
+                if (b2 & 0x04) != 0 { newPressed.insert(1) } // B
+                if (b2 & 0x02) != 0 { newPressed.insert(3) } // X
+                if (b2 & 0x01) != 0 { newPressed.insert(4) } // Y
+                if (b4 & 0x40) != 0 { newPressed.insert(6) } // LB
+                if (b2 & 0x40) != 0 { newPressed.insert(7) } // RB
+                if (b3 & 0x01) != 0 { newPressed.insert(10) } // Minus / Back
+                if (b3 & 0x02) != 0 { newPressed.insert(11) } // Plus / Start
+                if (b3 & 0x10) != 0 { newPressed.insert(12) } // Home / Guide
+                if (b3 & 0x08) != 0 { newPressed.insert(13) } // L3
+                if (b3 & 0x04) != 0 { newPressed.insert(14) } // R3
+
+                self.pressedButtons = newPressed
+
+                // D-Pad
+                dpadState.down = (b4 & 0x01) != 0
+                dpadState.up = (b4 & 0x02) != 0
+                dpadState.right = (b4 & 0x04) != 0
+                dpadState.left = (b4 & 0x08) != 0
+
+                // Triggers
+                leftTrigger = (b4 & 0x80) != 0 ? 1.0 : 0.0
+                rightTrigger = (b2 & 0x80) != 0 ? 1.0 : 0.0
+
+                // Sticks (12-bit unsigned, center ~2048)
+                let rawLX = Int(b[5]) | (Int(b[6] & 0x0F) << 8)
+                let rawLY = Int(b[6] >> 4) | (Int(b[7]) << 4)
+                let rawRX = Int(b[8]) | (Int(b[9] & 0x0F) << 8)
+                let rawRY = Int(b[9] >> 4) | (Int(b[10]) << 4)
+
+                leftStick.x = max(-1.0, min(1.0, Double(rawLX - 2048) / 1400.0))
+                leftStick.y = max(-1.0, min(1.0, -Double(rawLY - 2048) / 1400.0))
+                rightStick.x = max(-1.0, min(1.0, Double(rawRX - 2048) / 1400.0))
+                rightStick.y = max(-1.0, min(1.0, -Double(rawRY - 2048) / 1400.0))
+
+                if calibrating && canAdvanceStep && !newPressed.isEmpty {
+                    if let firstBtn = newPressed.first {
+                        recordCalibrationButton(firstBtn)
+                    }
+                }
+                return
+            }
+
+            // Standard HID Gamepad Parsing (8BitDo, Xbox, etc.)
             if page == 9 { // Button
                 let btn = Int(usage - 1)
                 if intVal == 1 {
@@ -314,21 +385,35 @@ final class ControllerManager: ObservableObject {
         }
     }
 
-    func testVibration() {
-        guard let current = currentDevice else { return }
-        isVibrating = true
-        let is8B = current.is8BitDo
-        let dev = current.device
+    func ping(playerIdx: Int) {
+        let devIdx = playerAssignments.indices.contains(playerIdx) ? playerAssignments[playerIdx] : playerIdx
+        guard devices.indices.contains(devIdx) else { return }
+        let dev = devices[devIdx]
+        pingingIndex = playerIdx
 
         Task.detached {
-            if is8B {
+            if dev.is8BitDo {
                 var pkt: [UInt8] = [0x05, 0xff, 0xff, 0x64, 0x64]
-                IOHIDDeviceSetReport(dev, kIOHIDReportTypeOutput, 0x05, &pkt, pkt.count)
-                try? await Task.sleep(nanoseconds: 1_200_000_000)
+                IOHIDDeviceSetReport(dev.device, kIOHIDReportTypeOutput, 0x05, &pkt, pkt.count)
+                try? await Task.sleep(nanoseconds: 400_000_000)
                 var stop: [UInt8] = [0x05, 0x00, 0x00, 0x00, 0x00]
-                IOHIDDeviceSetReport(dev, kIOHIDReportTypeOutput, 0x05, &stop, stop.count)
+                IOHIDDeviceSetReport(dev.device, kIOHIDReportTypeOutput, 0x05, &stop, stop.count)
+            } else if dev.vendorId == 0x057E {
+                var pkt = [UInt8](repeating: 0, count: 49)
+                pkt[0] = 0x10; pkt[1] = 0x01
+                pkt[2] = 0x28; pkt[3] = 0x88; pkt[4] = 0x60; pkt[5] = 0x61
+                pkt[6] = 0x28; pkt[7] = 0x88; pkt[8] = 0x60; pkt[9] = 0x61
+                IOHIDDeviceSetReport(dev.device, kIOHIDReportTypeOutput, 0x10, &pkt, pkt.count)
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                var stop = [UInt8](repeating: 0, count: 49)
+                stop[0] = 0x10; stop[1] = 0x02
+                stop[2] = 0x00; stop[3] = 0x01; stop[4] = 0x40; stop[5] = 0x40
+                stop[6] = 0x00; stop[7] = 0x01; stop[8] = 0x40; stop[9] = 0x40
+                IOHIDDeviceSetReport(dev.device, kIOHIDReportTypeOutput, 0x10, &stop, stop.count)
+            } else {
+                try? await Task.sleep(nanoseconds: 400_000_000)
             }
-            await MainActor.run { self.isVibrating = false }
+            await MainActor.run { self.pingingIndex = nil }
         }
     }
 
@@ -339,7 +424,42 @@ final class ControllerManager: ObservableObject {
         canAdvanceStep = true
         triggerArmed = false
         stepArmedTime = Date()
-        statusMessage = "Follow the prompts. Press and release each button on the selected controller."
+        statusMessage = "Follow the prompts. Press each button on the selected controller, or click Skip."
+    }
+
+    func skipStep() {
+        guard calibrating else { return }
+        canAdvanceStep = true
+        triggerArmed = false
+        stepArmedTime = Date()
+
+        switch currentStep {
+        case .a: currentStep = .b
+        case .b: currentStep = .x
+        case .x: currentStep = .y
+        case .y: currentStep = .lb
+        case .lb: currentStep = .rb
+        case .rb: currentStep = .lt
+        case .lt: currentStep = .rt
+        case .rt: currentStep = .back
+        case .back: currentStep = .start
+        case .start: currentStep = .l3
+        case .l3: currentStep = .r3
+        case .r3:
+            capturedMapping["dpup"] = "h0.1"
+            capturedMapping["dpdown"] = "h0.4"
+            capturedMapping["dpleft"] = "h0.8"
+            capturedMapping["dpright"] = "h0.2"
+            capturedMapping["leftx"] = "a0"
+            capturedMapping["lefty"] = "a1"
+            capturedMapping["rightx"] = "a2"
+            capturedMapping["righty"] = "a3"
+            saveMapping()
+            currentStep = .done
+            calibrating = false
+            statusMessage = "Mapping saved for \(currentDevice?.name ?? "controller")!"
+        default: break
+        }
     }
 
     private func recordCalibrationButton(_ button: Int) {
@@ -394,7 +514,6 @@ final class ControllerManager: ObservableObject {
             try? line.write(to: dbPath, atomically: true, encoding: .utf8)
         }
 
-        // Also update launch.sh export to include all database mappings
         let launchPath = URL(fileURLWithPath: (ProcessInfo.processInfo.environment["RECLAIMER_HOME"]
                                                ?? "\(NSHomeDirectory())/Games/ProjectReclaimer"))
             .appendingPathComponent("game/launch.sh")
@@ -455,12 +574,10 @@ struct StickGimbal: View {
                     .background(Circle().fill(Color(nsColor: .controlBackgroundColor)))
                     .frame(width: 48, height: 48)
 
-                // Deadzone center dot
                 Circle()
                     .fill(Color(nsColor: .tertiaryLabelColor).opacity(0.3))
                     .frame(width: 4, height: 4)
 
-                // Moving stick knob: White when idle, Accent Green when moving or clicked!
                 Circle()
                     .fill(isPressed || isDeflected ? accent : Color.white)
                     .frame(width: 20, height: 20)
@@ -508,153 +625,191 @@ struct ControllerSheet: View {
                 Button("Done") { dismiss() }.keyboardShortcut(.cancelAction)
             }
 
-            // Multi-Controller Slot Picker
-            if c.devices.count > 1 {
-                Picker("Controller", selection: $c.selectedIndex) {
-                    ForEach(c.devices.indices, id: \.self) { idx in
-                        Text("Player \(idx + 1): \(c.devices[idx].name)").tag(idx)
-                    }
-                }
-                .pickerStyle(.segmented)
-            }
+            if !c.devices.isEmpty {
+                // Player Assignment Dropdowns with Ping Buttons
+                VStack(spacing: 8) {
+                    ForEach(0..<max(1, c.devices.count), id: \.self) { playerIdx in
+                        HStack(spacing: 12) {
+                            Text("Player \(playerIdx + 1)")
+                                .font(.headline)
+                                .frame(width: 68, alignment: .leading)
 
-            if let dev = c.currentDevice {
-                HStack(spacing: 12) {
-                    Image(systemName: "gamecontroller.fill")
-                        .font(.title2)
-                        .foregroundStyle(accent)
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 6) {
-                            Text(dev.name).font(.headline)
-                            if c.devices.count > 1 {
-                                Text("Player \(c.selectedIndex + 1)")
-                                    .font(.caption2.bold())
-                                    .padding(.horizontal, 6).padding(.vertical, 2)
-                                    .background(Capsule().fill(accent.opacity(0.2)))
-                                    .foregroundStyle(accent)
+                            Picker("", selection: bindingFor(playerIdx)) {
+                                ForEach(c.devices.indices, id: \.self) { devIdx in
+                                    Text(c.devices[devIdx].name).tag(devIdx)
+                                }
                             }
+                            .pickerStyle(.menu)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                            // Ping button with haptic buzz and visual ring pulse
+                            Button {
+                                c.ping(playerIdx: playerIdx)
+                            } label: {
+                                Label(c.pingingIndex == playerIdx ? "Buzzing…" : "Ping",
+                                      systemImage: "dot.radiowaves.left.and.right")
+                            }
+                            .controlSize(.regular)
+                            .disabled(c.pingingIndex != nil)
+                            .help("Vibrate this controller to identify which physical gamepad is assigned to Player \(playerIdx + 1)")
+
+                            // Radio selection to focus diagram
+                            Button {
+                                c.selectedPlayerIndex = playerIdx
+                            } label: {
+                                Image(systemName: c.selectedPlayerIndex == playerIdx ? "checkmark.circle.fill" : "circle")
+                                    .font(.title3)
+                                    .foregroundStyle(c.selectedPlayerIndex == playerIdx ? accent : .secondary)
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Select this player to test inputs and calibrate below")
                         }
-                        Text(String(format: "VID: 0x%04X · PID: 0x%04X", dev.vendorId, dev.productId))
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button(action: c.testVibration) {
-                        Label(c.isVibrating ? "Vibrating…" : "Test Vibration", systemImage: "waveform.path")
-                    }
-                    .controlSize(.regular)
-                    .disabled(c.isVibrating || !dev.is8BitDo)
-                }
-                .padding(10)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
-
-                // 1:1 Vector Gamepad Canvas
-                ZStack {
-                    ExactXboxBodyShape()
-                        .fill(Color(nsColor: .controlBackgroundColor).opacity(0.92))
-                        .overlay(
-                            ExactXboxBodyShape()
-                                .stroke(Color(nsColor: .separatorColor).opacity(0.85), lineWidth: 2)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(c.selectedPlayerIndex == playerIdx
+                                      ? accent.opacity(0.12)
+                                      : Color(nsColor: .controlBackgroundColor))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .stroke(c.pingingIndex == playerIdx ? accent : Color.clear, lineWidth: 2)
+                                )
                         )
-                        .shadow(color: .black.opacity(0.22), radius: 8, y: 4)
-
-                    // 1. Left Trigger & Bumper
-                    TriggerBar(label: "LT", value: c.leftTrigger)
-                        .position(x: 138.5 * s, y: 26 * s)
-                    buttonBadge("LB", active: c.isActionPressed("leftshoulder"), w: 42, h: 18)
-                        .position(x: 132.0 * s, y: 64 * s)
-
-                    // 2. Right Trigger & Bumper
-                    TriggerBar(label: "RT", value: c.rightTrigger)
-                        .position(x: 303.5 * s, y: 26 * s)
-                    buttonBadge("RB", active: c.isActionPressed("rightshoulder"), w: 42, h: 18)
-                        .position(x: 310.0 * s, y: 64 * s)
-
-                    // 3. Left Thumbstick
-                    StickGimbal(label: "LS (L3)", stick: c.leftStick, isPressed: c.isActionPressed("leftstick"))
-                        .position(x: 113 * s, y: 160 * s)
-
-                    // 4. D-Pad
-                    buttonBadge("▲", active: c.dpadState.up, w: 24, h: 20)
-                        .position(x: 166 * s, y: (238 - 24) * s)
-                    buttonBadge("◀", active: c.dpadState.left, w: 24, h: 20)
-                        .position(x: (166 - 24) * s, y: 238 * s)
-                    Circle()
-                        .fill(Color(nsColor: .separatorColor).opacity(0.35))
-                        .frame(width: 8, height: 8)
-                        .position(x: 166 * s, y: 238 * s)
-                    buttonBadge("▶", active: c.dpadState.right, w: 24, h: 20)
-                        .position(x: (166 + 24) * s, y: 238 * s)
-                    buttonBadge("▼", active: c.dpadState.down, w: 24, h: 20)
-                        .position(x: 166 * s, y: (238 + 24) * s)
-
-                    // 5. Center Console: Guide emblem + Back/Start
-                    let guideActive = c.isActionPressed("guide") || c.pressedButtons.contains(12)
-                    ZStack {
-                        Circle()
-                            .fill(guideActive ? accent : Color(nsColor: .tertiaryLabelColor).opacity(0.25))
-                            .frame(width: 32, height: 32)
-                        Image(systemName: "circle.circle")
-                            .font(.system(size: 16, weight: .bold))
-                            .foregroundStyle(guideActive ? .white : .primary)
                     }
-                    .help("Guide button. In System Settings > Game Controllers, set Home Button to None so macOS passes it to games.")
-                    .position(x: 220.5 * s, y: 130 * s)
-
-                    VStack(spacing: 2) {
-                        buttonBadge("◀", active: c.isActionPressed("back"), w: 26, h: 18)
-                        Text("Back").font(.system(size: 8)).foregroundStyle(.secondary)
-                    }
-                    .position(x: 185 * s, y: 162 * s)
-
-                    VStack(spacing: 2) {
-                        buttonBadge("▶", active: c.isActionPressed("start"), w: 26, h: 18)
-                        Text("Start").font(.system(size: 8)).foregroundStyle(.secondary)
-                    }
-                    .position(x: 259 * s, y: 162 * s)
-
-                    // 6. Face Buttons ABXY
-                    buttonBadge("Y", active: c.isActionPressed("y"), w: 24, h: 22)
-                        .position(x: 329 * s, y: (160 - 26) * s)
-                    buttonBadge("X", active: c.isActionPressed("x"), w: 24, h: 22)
-                        .position(x: (329 - 26) * s, y: 160 * s)
-                    buttonBadge("B", active: c.isActionPressed("b"), w: 24, h: 22)
-                        .position(x: (329 + 26) * s, y: 160 * s)
-                    buttonBadge("A", active: c.isActionPressed("a"), w: 24, h: 22)
-                        .position(x: 329 * s, y: (160 + 26) * s)
-
-                    // 7. Right Thumbstick
-                    StickGimbal(label: "RS (R3)", stick: c.rightStick, isPressed: c.isActionPressed("rightstick"))
-                        .position(x: 278 * s, y: 238 * s)
                 }
-                .frame(width: 390, height: 356)
-                .frame(maxWidth: .infinity, alignment: .center)
 
-                // Calibration Area
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
+                // Selected Controller Diagnostic Card
+                if let dev = c.currentDevice {
+                    HStack(spacing: 10) {
+                        Image(systemName: "gamecontroller.fill")
+                            .font(.title3)
+                            .foregroundStyle(accent)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Controller Mapping").font(.subheadline.bold())
-                            Text(c.calibrating ? c.currentStep.prompt : "Controls feel swapped or inverted? Run calibration.")
+                            Text("\(dev.name) (Player \(c.selectedPlayerIndex + 1))").font(.headline)
+                            Text(String(format: "VID: 0x%04X · PID: 0x%04X · GUID: %@", dev.vendorId, dev.productId, dev.guid))
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
-                        if c.calibrating {
-                            Button("Cancel") { c.calibrating = false }
-                        } else {
-                            Button("Remap Controller") { c.startCalibration() }
-                                .buttonStyle(.borderedProminent)
-                                .tint(accent)
+                    }
+                    .padding(8)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .controlBackgroundColor).opacity(0.6)))
+
+                    // 1:1 Vector Gamepad Canvas
+                    ZStack {
+                        ExactXboxBodyShape()
+                            .fill(Color(nsColor: .controlBackgroundColor).opacity(0.92))
+                            .overlay(
+                                ExactXboxBodyShape()
+                                    .stroke(Color(nsColor: .separatorColor).opacity(0.85), lineWidth: 2)
+                            )
+                            .shadow(color: .black.opacity(0.22), radius: 8, y: 4)
+
+                        // 1. Left Trigger & Bumper
+                        TriggerBar(label: "LT", value: c.leftTrigger)
+                            .position(x: 138.5 * s, y: 26 * s)
+                        buttonBadge("LB", active: c.isActionPressed("leftshoulder"), w: 42, h: 18)
+                            .position(x: 132.0 * s, y: 64 * s)
+
+                        // 2. Right Trigger & Bumper
+                        TriggerBar(label: "RT", value: c.rightTrigger)
+                            .position(x: 303.5 * s, y: 26 * s)
+                        buttonBadge("RB", active: c.isActionPressed("rightshoulder"), w: 42, h: 18)
+                            .position(x: 310.0 * s, y: 64 * s)
+
+                        // 3. Left Thumbstick
+                        StickGimbal(label: "LS (L3)", stick: c.leftStick, isPressed: c.isActionPressed("leftstick"))
+                            .position(x: 113 * s, y: 160 * s)
+
+                        // 4. D-Pad
+                        buttonBadge("▲", active: c.dpadState.up, w: 24, h: 20)
+                            .position(x: 166 * s, y: (238 - 24) * s)
+                        buttonBadge("◀", active: c.dpadState.left, w: 24, h: 20)
+                            .position(x: (166 - 24) * s, y: 238 * s)
+                        Circle()
+                            .fill(Color(nsColor: .separatorColor).opacity(0.35))
+                            .frame(width: 8, height: 8)
+                            .position(x: 166 * s, y: 238 * s)
+                        buttonBadge("▶", active: c.dpadState.right, w: 24, h: 20)
+                            .position(x: (166 + 24) * s, y: 238 * s)
+                        buttonBadge("▼", active: c.dpadState.down, w: 24, h: 20)
+                            .position(x: 166 * s, y: (238 + 24) * s)
+
+                        // 5. Center Console: Guide emblem + Back/Start
+                        let guideActive = c.isActionPressed("guide") || c.pressedButtons.contains(12)
+                        ZStack {
+                            Circle()
+                                .fill(guideActive ? accent : Color(nsColor: .tertiaryLabelColor).opacity(0.25))
+                                .frame(width: 32, height: 32)
+                            Image(systemName: "circle.circle")
+                                .font(.system(size: 16, weight: .bold))
+                                .foregroundStyle(guideActive ? .white : .primary)
+                        }
+                        .help("Guide button. In System Settings > Game Controllers, set Home Button to None so macOS passes it to games.")
+                        .position(x: 220.5 * s, y: 130 * s)
+
+                        VStack(spacing: 2) {
+                            buttonBadge("◀", active: c.isActionPressed("back"), w: 26, h: 18)
+                            Text("Back").font(.system(size: 8)).foregroundStyle(.secondary)
+                        }
+                        .position(x: 185 * s, y: 162 * s)
+
+                        VStack(spacing: 2) {
+                            buttonBadge("▶", active: c.isActionPressed("start"), w: 26, h: 18)
+                            Text("Start").font(.system(size: 8)).foregroundStyle(.secondary)
+                        }
+                        .position(x: 259 * s, y: 162 * s)
+
+                        // 6. Face Buttons ABXY
+                        buttonBadge("Y", active: c.isActionPressed("y"), w: 24, h: 22)
+                            .position(x: 329 * s, y: (160 - 26) * s)
+                        buttonBadge("X", active: c.isActionPressed("x"), w: 24, h: 22)
+                            .position(x: (329 - 26) * s, y: 160 * s)
+                        buttonBadge("B", active: c.isActionPressed("b"), w: 24, h: 22)
+                            .position(x: (329 + 26) * s, y: 160 * s)
+                        buttonBadge("A", active: c.isActionPressed("a"), w: 24, h: 22)
+                            .position(x: 329 * s, y: (160 + 26) * s)
+
+                        // 7. Right Thumbstick
+                        StickGimbal(label: "RS (R3)", stick: c.rightStick, isPressed: c.isActionPressed("rightstick"))
+                            .position(x: 278 * s, y: 238 * s)
+                    }
+                    .frame(width: 390, height: 356)
+                    .frame(maxWidth: .infinity, alignment: .center)
+
+                    // Calibration Area with Skip Option
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Controller Mapping").font(.subheadline.bold())
+                                Text(c.calibrating ? c.currentStep.prompt : "Controls feel swapped or inverted? Run calibration for Player \(c.selectedPlayerIndex + 1).")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if c.calibrating {
+                                HStack(spacing: 8) {
+                                    Button("Skip") { c.skipStep() }
+                                        .controlSize(.regular)
+                                        .help("Skip this input if your controller does not have this button")
+                                    Button("Cancel") { c.calibrating = false }
+                                        .controlSize(.regular)
+                                }
+                            } else {
+                                Button("Remap Player \(c.selectedPlayerIndex + 1)") { c.startCalibration() }
+                                    .buttonStyle(.borderedProminent)
+                                    .tint(accent)
+                            }
+                        }
+
+                        if let msg = c.statusMessage {
+                            Text(msg)
+                                .font(.caption.bold())
+                                .foregroundStyle(accent)
                         }
                     }
-
-                    if let msg = c.statusMessage {
-                        Text(msg)
-                            .font(.caption.bold())
-                            .foregroundStyle(accent)
-                    }
+                    .padding(10)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
                 }
-                .padding(10)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
 
             } else {
                 VStack(spacing: 12) {
@@ -677,7 +832,23 @@ struct ControllerSheet: View {
             }
         }
         .padding(18)
-        .frame(width: 490)
+        .frame(width: 500)
+    }
+
+    private func bindingFor(_ playerIdx: Int) -> Binding<Int> {
+        Binding<Int>(
+            get: {
+                if c.playerAssignments.indices.contains(playerIdx) {
+                    return c.playerAssignments[playerIdx]
+                }
+                return 0
+            },
+            set: { newDevIdx in
+                if c.playerAssignments.indices.contains(playerIdx) {
+                    c.playerAssignments[playerIdx] = newDevIdx
+                }
+            }
+        )
     }
 
     private func buttonBadge(_ text: String, active: Bool, w: CGFloat = 26, h: CGFloat = 22) -> some View {

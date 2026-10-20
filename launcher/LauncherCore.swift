@@ -409,6 +409,9 @@ func knownLayout(vendor: Int) -> [String: String]? {
                 "rightshoulder": "b\(GCButton.rightShoulder.rawValue)", "back": "b\(GCButton.back.rawValue)",
                 "start": "b\(GCButton.start.rawValue)", "guide": "b\(GCButton.guide.rawValue)",
                 "leftstick": "b\(GCButton.leftStick.rawValue)", "rightstick": "b\(GCButton.rightStick.rawValue)"]
+    case 0x057E:  // Nintendo
+        return ["a": "b0", "b": "b1", "x": "b2", "y": "b3", "leftshoulder": "b6", "rightshoulder": "b7",
+                "back": "b10", "start": "b11", "guide": "b12", "leftstick": "b13", "rightstick": "b14"]
     default: return nil
     }
 }
@@ -422,6 +425,13 @@ enum GCButton: Int, CaseIterable {
 /// controller service switches a PlayStation pad (DualSense, DualShock 4) to its full report, which isn't
 /// described in HID values, so the raw view showed no input at all (seen with a DualSense on 1.4.1).
 func readsThroughGameController(vendor: Int) -> Bool { vendor == 0x054C }
+
+/// SDL2-compatible wildcard GUID (crc=0, version=0, little-endian VID and PID).
+func sdlWildcardGuid(vendorId: Int, productId: Int) -> String {
+    String(format: "03000000%02x%02x0000%02x%02x000000000000",
+           vendorId & 0xff, (vendorId >> 8) & 0xff,
+           productId & 0xff, (productId >> 8) & 0xff)
+}
 
 // MARK: - memory
 

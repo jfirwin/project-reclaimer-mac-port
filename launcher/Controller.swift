@@ -682,6 +682,7 @@ final class ControllerManager: ObservableObject {
         pingingIndex = playerIdx
 
         Task.detached {
+            IOHIDDeviceOpen(dev.device, IOOptionBits(kIOHIDOptionsTypeNone))
             if dev.vendorId == 0x2DC8 {
                 var pkt: [UInt8] = [0x05, 0xff, 0xff, 0x64, 0x64]
                 IOHIDDeviceSetReport(dev.device, kIOHIDReportTypeOutput, 0x05, &pkt, pkt.count)

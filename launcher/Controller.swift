@@ -72,6 +72,22 @@ final class ControllerManager: ObservableObject {
         return hasActiveMapping ? rightTrigger : 0.0
     }
 
+    var displayLeftStick: CGPoint {
+        var pt = leftStick
+        if activeMapping["lefty"]?.contains("~") == true {
+            pt.y = -pt.y
+        }
+        return pt
+    }
+
+    var displayRightStick: CGPoint {
+        var pt = rightStick
+        if activeMapping["righty"]?.contains("~") == true {
+            pt.y = -pt.y
+        }
+        return pt
+    }
+
     // Calibration wizard state
     enum CalibStep: Int, CaseIterable {
         case a, b, x, y, lb, rb, lt, rt, back, start, l3, lup, r3, rup, done
@@ -136,6 +152,8 @@ final class ControllerManager: ObservableObject {
     private var awaitingButtonRelease = false
     private var triggerArmed = false
     private var stickArmed = false
+    private var stickPeak: Double = 0.0
+    private var stickUsage: Int = 0
     private var stepArmedTime = Date()
 
     init() {
@@ -326,7 +344,7 @@ final class ControllerManager: ObservableObject {
                         let parts = line.components(separatedBy: ",")
                         for part in parts.dropFirst(2) {
                             let kv = part.components(separatedBy: ":")
-                            if kv.count == 2 {
+                            if kv.count == 2 && kv[0] != "platform" {
                                 activeMapping[kv[0]] = kv[1]
                             }
                         }
@@ -413,9 +431,9 @@ final class ControllerManager: ObservableObject {
                         handleTriggerCalibration(isLeft: true, value: leftTrigger)
                         handleTriggerCalibration(isLeft: false, value: rightTrigger)
                     } else if currentStep == .lup {
-                        handleStickCalibration(isLeft: true, pos: leftStick.y)
+                        handleStickCalibration(usage: 0x31, pos: leftStick.y)
                     } else if currentStep == .rup {
-                        handleStickCalibration(isLeft: false, pos: rightStick.y)
+                        handleStickCalibration(usage: 0x35, pos: rightStick.y)
                     } else {
                         if canAdvanceStep && !newPressed.isEmpty {
                             if let firstBtn = newPressed.first {
@@ -461,12 +479,14 @@ final class ControllerManager: ObservableObject {
                     leftStick.x = stickPosition(intVal, min: lo, max: hi)
                 } else if usage == 0x31 { // Y axis
                     leftStick.y = stickPosition(intVal, min: lo, max: hi)
-                    handleStickCalibration(isLeft: true, pos: leftStick.y)
+                    handleStickCalibration(usage: Int(usage), pos: leftStick.y)
                 } else if usage == 0x32 { // Z axis / Right Stick X
                     rightStick.x = stickPosition(intVal, min: lo, max: hi)
+                } else if usage == 0x34 { // Ry axis (wired Xbox 360 Right Stick Y)
+                    handleStickCalibration(usage: Int(usage), pos: stickPosition(intVal, min: lo, max: hi))
                 } else if usage == 0x35 { // Rz axis / Right Stick Y
                     rightStick.y = stickPosition(intVal, min: lo, max: hi)
-                    handleStickCalibration(isLeft: false, pos: rightStick.y)
+                    handleStickCalibration(usage: Int(usage), pos: rightStick.y)
                 }
             } else if page == 2 { // Simulation controls (Triggers)
                 if usage == 0xC5 { // Left Trigger (Brake)
@@ -509,17 +529,42 @@ final class ControllerManager: ObservableObject {
         }
     }
 
-    private func handleStickCalibration(isLeft: Bool, pos: Double) {
-        guard calibrating else { return }
-        if isLeft && currentStep == .lup {
+    private func deviceAxisUsages(device: IOHIDDevice) -> [Int] {
+        let matching: [String: Any] = [
+            kIOHIDElementUsagePageKey as String: kHIDPage_GenericDesktop
+        ]
+        guard let elements = IOHIDDeviceCopyMatchingElements(device, matching as CFDictionary, 0) as? [IOHIDElement] else {
+            return [0x30, 0x31, 0x32, 0x35]
+        }
+        var usages = Set<Int>()
+        for elem in elements {
+            let type = IOHIDElementGetType(elem)
+            let usage = Int(IOHIDElementGetUsage(elem))
+            if (type == kIOHIDElementTypeInput_Axis || type == kIOHIDElementTypeInput_Misc) && usage >= 0x30 && usage <= 0x36 {
+                usages.insert(usage)
+            }
+        }
+        return usages.isEmpty ? [0x30, 0x31, 0x32, 0x35] : usages.sorted()
+    }
+
+    private func handleStickCalibration(usage: Int, pos: Double) {
+        guard calibrating, let dev = currentDevice else { return }
+        if currentStep == .lup {
             if abs(pos) > 0.6 {
                 stickArmed = true
+                if abs(pos) > abs(stickPeak) {
+                    stickPeak = pos
+                    stickUsage = usage
+                }
             } else if abs(pos) < 0.25 && stickArmed {
                 stickArmed = false
-                let base = activeMapping["lefty"]?.replacingOccurrences(of: "~", with: "") ?? "a1"
-                capturedMapping["leftx"] = activeMapping["leftx"] ?? "a0"
-                // In standard SDL, push up is negative. If hardware pushed up is positive, it is reversed (~).
-                capturedMapping["lefty"] = pos > 0.5 ? "\(base)~" : base
+                let usages = deviceAxisUsages(device: dev.device)
+                let yIndex = usages.firstIndex(of: stickUsage > 0 ? stickUsage : 0x31) ?? 1
+                let xIndex = usages.firstIndex(of: 0x30) ?? 0
+                capturedMapping["leftx"] = "a\(xIndex)"
+                capturedMapping["lefty"] = "a\(yIndex)\(stickPeak > 0 ? "~" : "")"
+                stickPeak = 0.0
+                stickUsage = 0
                 currentStep = .r3
                 canAdvanceStep = false
                 awaitingButtonRelease = false
@@ -528,15 +573,23 @@ final class ControllerManager: ObservableObject {
                     self.canAdvanceStep = true
                 }
             }
-        } else if !isLeft && currentStep == .rup {
+        } else if currentStep == .rup {
             if abs(pos) > 0.6 {
                 stickArmed = true
+                if abs(pos) > abs(stickPeak) {
+                    stickPeak = pos
+                    stickUsage = usage
+                }
             } else if abs(pos) < 0.25 && stickArmed {
                 stickArmed = false
-                let base = activeMapping["righty"]?.replacingOccurrences(of: "~", with: "") ?? "a3"
-                capturedMapping["rightx"] = activeMapping["rightx"] ?? "a2"
-                // In standard SDL, push up is negative. If hardware pushed up is positive, it is reversed (~).
-                capturedMapping["righty"] = pos > 0.5 ? "\(base)~" : base
+                let usages = deviceAxisUsages(device: dev.device)
+                let yIndex = usages.firstIndex(of: stickUsage > 0 ? stickUsage : 0x35) ?? (usages.count > 4 ? 4 : 3)
+                let xUsage = (stickUsage == 0x34) ? 0x33 : 0x32
+                let xIndex = usages.firstIndex(of: xUsage) ?? (yIndex - 1)
+                capturedMapping["rightx"] = "a\(xIndex)"
+                capturedMapping["righty"] = "a\(yIndex)\(stickPeak > 0 ? "~" : "")"
+                stickPeak = 0.0
+                stickUsage = 0
                 finishCalibration()
             }
         }
@@ -597,6 +650,8 @@ final class ControllerManager: ObservableObject {
         awaitingButtonRelease = false
         triggerArmed = false
         stickArmed = false
+        stickPeak = 0.0
+        stickUsage = 0
         stepArmedTime = Date()
         statusMessage = nil
     }
@@ -607,6 +662,8 @@ final class ControllerManager: ObservableObject {
         awaitingButtonRelease = false
         triggerArmed = false
         stickArmed = false
+        stickPeak = 0.0
+        stickUsage = 0
         stepArmedTime = Date()
 
         switch currentStep {
@@ -672,8 +729,12 @@ final class ControllerManager: ObservableObject {
     private func saveMapping() {
         guard let current = currentDevice, !current.guid.isEmpty else { return }
         activeMapping = capturedMapping
-        let mapEntries = capturedMapping.map { "\($0.key):\($0.value)" }.joined(separator: ",")
-        let line = "\(current.guid),\(current.name),\(mapEntries),platform:Mac OS X,\n"
+        let mapEntries = capturedMapping
+            .filter { $0.key != "platform" }
+            .map { "\($0.key):\($0.value)" }
+            .joined(separator: ",")
+        let safeName = current.name.replacingOccurrences(of: ",", with: " ")
+        let line = "\(current.guid),\(safeName),\(mapEntries),platform:Mac OS X,\n"
 
         // Calibrations live in ~/Games/ProjectReclaimer/controller-mappings.txt so installer updates never touch them
         let baseDir = URL(fileURLWithPath: (ProcessInfo.processInfo.environment["RECLAIMER_HOME"]
@@ -922,7 +983,7 @@ struct ControllerSheet: View {
                             .position(x: 310.0 * s, y: 64 * s)
 
                         // 3. Left Thumbstick
-                        StickGimbal(label: "LS (L3)", stick: c.leftStick,
+                        StickGimbal(label: "LS (L3)", stick: c.displayLeftStick,
                                     isPressed: c.isActionPressed("leftstick"),
                                     highlighted: c.calibrating && (c.currentStep == .l3 || c.currentStep == .lup),
                                     showUpArrow: c.calibrating && c.currentStep == .lup)
@@ -1000,7 +1061,7 @@ struct ControllerSheet: View {
                             .position(x: 329 * s, y: (160 + 26) * s)
 
                         // 7. Right Thumbstick
-                        StickGimbal(label: "RS (R3)", stick: c.rightStick,
+                        StickGimbal(label: "RS (R3)", stick: c.displayRightStick,
                                     isPressed: c.isActionPressed("rightstick"),
                                     highlighted: c.calibrating && (c.currentStep == .r3 || c.currentStep == .rup),
                                     showUpArrow: c.calibrating && c.currentStep == .rup)

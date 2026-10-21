@@ -52,6 +52,10 @@ final class LineProcess {
         // updates rebuild the app the player opened, wherever it is; never the read-only disk image's copy
         if isInstalledApp { env["RECLAIMER_APP_PATH"] = Bundle.main.bundlePath }
         env["RECLAIMER_LAUNCHER_NOTIFIES"] = "1"  // the helper leaves notifications to this window
+        let activeMappingPath = home.appendingPathComponent("controller-mappings-active.txt")
+        if FileManager.default.fileExists(atPath: activeMappingPath.path) {
+            env["SDL_GAMECONTROLLERCONFIG_FILE"] = activeMappingPath.path
+        }
         process.environment = env
         process.standardInput = FileHandle.nullDevice
         let out = Pipe()

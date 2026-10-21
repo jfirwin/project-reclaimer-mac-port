@@ -227,6 +227,7 @@ check(knownLayout(vendor: 0x057E)?["a"] == "b0" && knownLayout(vendor: 0x057E)?[
       && knownLayout(vendor: 0x057E)?["x"] == "b2", "Nintendo layout")
 check(knownLayout(vendor: 0x1234) == nil, "unknown pads keep the unmapped view")
 check(sdlWildcardGuid(vendorId: 0x057E, productId: 0x2009) == "030000007e0500000920000000000000", "Wildcard GUID")
+check(sdlGuid(vendorId: 0x045E, productId: 0x028E, version: 0x0110) == "030000005e0400008e02000010010000", "Versioned GUID")
 
 // PlayStation pads are read through Apple's GameController framework, in its standard button order
 check(readsThroughGameController(vendor: 0x054C) && !readsThroughGameController(vendor: 0x045E)

@@ -426,11 +426,17 @@ enum GCButton: Int, CaseIterable {
 /// described in HID values, so the raw view showed no input at all (seen with a DualSense on 1.4.1).
 func readsThroughGameController(vendor: Int) -> Bool { vendor == 0x054C }
 
+/// SDL2-compatible GUID for macOS IOKit joystick driver.
+func sdlGuid(vendorId: Int, productId: Int, version: Int = 0) -> String {
+    String(format: "03000000%02x%02x0000%02x%02x0000%02x%02x0000",
+           vendorId & 0xff, (vendorId >> 8) & 0xff,
+           productId & 0xff, (productId >> 8) & 0xff,
+           version & 0xff, (version >> 8) & 0xff)
+}
+
 /// SDL2-compatible wildcard GUID (crc=0, version=0, little-endian VID and PID).
 func sdlWildcardGuid(vendorId: Int, productId: Int) -> String {
-    String(format: "03000000%02x%02x0000%02x%02x000000000000",
-           vendorId & 0xff, (vendorId >> 8) & 0xff,
-           productId & 0xff, (productId >> 8) & 0xff)
+    sdlGuid(vendorId: vendorId, productId: productId, version: 0)
 }
 
 // MARK: - memory

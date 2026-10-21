@@ -5,16 +5,30 @@ import SwiftUI
 import IOKit.hid
 import GameController
 
+struct AxisID: Hashable, Comparable {
+    let page: Int
+    let usage: Int
+
+    static func < (lhs: AxisID, rhs: AxisID) -> Bool {
+        if lhs.page != rhs.page { return lhs.page < rhs.page }
+        return lhs.usage < rhs.usage
+    }
+}
+
 struct ControllerDevice: Identifiable, Equatable {
     let id: String
     let device: IOHIDDevice
     let name: String
     let vendorId: Int
     let productId: Int
+    let versionNumber: Int
     let guid: String
 
     var isNintendo: Bool { vendorId == 0x057E }
     var isXbox: Bool { vendorId == 0x045E }
+    var isSony: Bool { vendorId == 0x054C }
+    // ponytail: knownLayout covers first-party pads (Microsoft, Sony, Nintendo) handled by SDL's HIDAPI
+    var canRemap: Bool { knownLayout(vendor: vendorId) == nil }
 
     static func == (lhs: ControllerDevice, rhs: ControllerDevice) -> Bool {
         lhs.id == rhs.id
@@ -59,15 +73,27 @@ final class ControllerManager: ObservableObject {
 
     var displayLeftTrigger: Double {
         if let binding = activeMapping["lefttrigger"] {
-            if binding == "a5" { return leftTrigger }
-            if binding == "a4" { return rightTrigger }
+            let axes = deviceAxisList(device: currentDevice?.device)
+            if let idx = Int(binding.dropFirst()), axes.indices.contains(idx) {
+                let axis = axes[idx]
+                if axis.page == 2 && axis.usage == 0xC5 { return leftTrigger }
+                if axis.page == 2 && axis.usage == 0xC4 { return rightTrigger }
+                if axis.page == 1 && axis.usage == 0x32 { return leftTrigger }
+                if axis.page == 1 && axis.usage == 0x35 { return rightTrigger }
+            }
         }
         return hasActiveMapping ? leftTrigger : 0.0
     }
     var displayRightTrigger: Double {
         if let binding = activeMapping["righttrigger"] {
-            if binding == "a4" { return rightTrigger }
-            if binding == "a5" { return leftTrigger }
+            let axes = deviceAxisList(device: currentDevice?.device)
+            if let idx = Int(binding.dropFirst()), axes.indices.contains(idx) {
+                let axis = axes[idx]
+                if axis.page == 2 && axis.usage == 0xC4 { return rightTrigger }
+                if axis.page == 2 && axis.usage == 0xC5 { return leftTrigger }
+                if axis.page == 1 && axis.usage == 0x35 { return rightTrigger }
+                if axis.page == 1 && axis.usage == 0x32 { return leftTrigger }
+            }
         }
         return hasActiveMapping ? rightTrigger : 0.0
     }
@@ -151,9 +177,10 @@ final class ControllerManager: ObservableObject {
     private var canAdvanceStep = true
     private var awaitingButtonRelease = false
     private var triggerArmed = false
+    private var triggerAxis = AxisID(page: 0, usage: 0)
     private var stickArmed = false
     private var stickPeak: Double = 0.0
-    private var stickUsage: Int = 0
+    private var stickAxis = AxisID(page: 0, usage: 0)
     private var stepArmedTime = Date()
 
     init() {
@@ -247,12 +274,14 @@ final class ControllerManager: ObservableObject {
                 continue
             }
 
+            let ver = (IOHIDDeviceGetProperty(dev, "VersionNumber" as CFString) as? Int) ?? 0
             let name = (vid == 0x057E && rawName.isEmpty) ? "Nintendo Switch Controller" : rawName
             let guid = sdlWildcardGuid(vendorId: vid, productId: pid)
 
             let id = "\(vid)-\(pid)-\(idx)"
             found.append(ControllerDevice(id: id, device: dev, name: name,
                                           vendorId: vid, productId: pid,
+                                          versionNumber: ver,
                                           guid: guid))
         }
 
@@ -428,12 +457,12 @@ final class ControllerManager: ObservableObject {
 
                 if calibrating {
                     if currentStep == .lt || currentStep == .rt {
-                        handleTriggerCalibration(isLeft: true, value: leftTrigger)
-                        handleTriggerCalibration(isLeft: false, value: rightTrigger)
+                        handleTriggerCalibration(page: 2, usage: 0xC5, value: leftTrigger)
+                        handleTriggerCalibration(page: 2, usage: 0xC4, value: rightTrigger)
                     } else if currentStep == .lup {
-                        handleStickCalibration(usage: 0x31, pos: leftStick.y)
+                        handleStickCalibration(page: 1, usage: 0x31, pos: leftStick.y)
                     } else if currentStep == .rup {
-                        handleStickCalibration(usage: 0x35, pos: rightStick.y)
+                        handleStickCalibration(page: 1, usage: 0x35, pos: rightStick.y)
                     } else {
                         if canAdvanceStep && !newPressed.isEmpty {
                             if let firstBtn = newPressed.first {
@@ -471,7 +500,8 @@ final class ControllerManager: ObservableObject {
                         }
                     }
                 }
-            } else if page == 1 { // Generic Desktop (Sticks / D-Pad)
+            } else if page == 1 { // Generic Desktop (Sticks / D-Pad / 360 Triggers)
+                let is360Style = hasSeparateRyAxis(device: currentDevice?.device)
                 if usage == 0x39 { // Hat switch (D-Pad)
                     let hat = hatDirections(intVal, min: lo, max: hi)
                     dpadState = (hat.up, hat.down, hat.left, hat.right)
@@ -479,44 +509,99 @@ final class ControllerManager: ObservableObject {
                     leftStick.x = stickPosition(intVal, min: lo, max: hi)
                 } else if usage == 0x31 { // Y axis
                     leftStick.y = stickPosition(intVal, min: lo, max: hi)
-                    handleStickCalibration(usage: Int(usage), pos: leftStick.y)
-                } else if usage == 0x32 { // Z axis / Right Stick X
-                    rightStick.x = stickPosition(intVal, min: lo, max: hi)
+                    handleStickCalibration(page: 1, usage: Int(usage), pos: leftStick.y)
+                } else if usage == 0x32 { // Z axis
+                    if is360Style {
+                        leftTrigger = axisFraction(intVal, min: lo, max: hi)
+                        handleTriggerCalibration(page: 1, usage: 0x32, value: leftTrigger)
+                    } else {
+                        rightStick.x = stickPosition(intVal, min: lo, max: hi)
+                    }
+                } else if usage == 0x33 { // Rx axis (Right Stick X on 360 pads)
+                    if is360Style {
+                        rightStick.x = stickPosition(intVal, min: lo, max: hi)
+                    }
                 } else if usage == 0x34 { // Ry axis (wired Xbox 360 Right Stick Y)
-                    handleStickCalibration(usage: Int(usage), pos: stickPosition(intVal, min: lo, max: hi))
-                } else if usage == 0x35 { // Rz axis / Right Stick Y
                     rightStick.y = stickPosition(intVal, min: lo, max: hi)
-                    handleStickCalibration(usage: Int(usage), pos: rightStick.y)
+                    handleStickCalibration(page: 1, usage: Int(usage), pos: rightStick.y)
+                } else if usage == 0x35 { // Rz axis
+                    if is360Style {
+                        rightTrigger = axisFraction(intVal, min: lo, max: hi)
+                        handleTriggerCalibration(page: 1, usage: 0x35, value: rightTrigger)
+                    } else {
+                        rightStick.y = stickPosition(intVal, min: lo, max: hi)
+                        handleStickCalibration(page: 1, usage: Int(usage), pos: rightStick.y)
+                    }
                 }
-            } else if page == 2 { // Simulation controls (Triggers)
+            } else if page == 2 { // Simulation controls (Triggers on 8BitDo / standard HID)
                 if usage == 0xC5 { // Left Trigger (Brake)
                     leftTrigger = axisFraction(intVal, min: lo, max: hi)
-                    handleTriggerCalibration(isLeft: true, value: leftTrigger, axis: "a5")
+                    handleTriggerCalibration(page: 2, usage: 0xC5, value: leftTrigger)
                 } else if usage == 0xC4 { // Right Trigger (Accelerator)
                     rightTrigger = axisFraction(intVal, min: lo, max: hi)
-                    handleTriggerCalibration(isLeft: false, value: rightTrigger, axis: "a4")
+                    handleTriggerCalibration(page: 2, usage: 0xC4, value: rightTrigger)
                 }
             }
         }
     }
 
-    private func handleTriggerCalibration(isLeft: Bool, value: Double, axis: String? = nil) {
-        guard calibrating else { return }
-        if isLeft && currentStep == .lt {
+    private func deviceAxisList(device: IOHIDDevice?) -> [AxisID] {
+        guard let device else {
+            return [AxisID(page: 1, usage: 0x30), AxisID(page: 1, usage: 0x31),
+                    AxisID(page: 1, usage: 0x32), AxisID(page: 1, usage: 0x35)]
+        }
+        guard let elements = IOHIDDeviceCopyMatchingElements(device, nil, 0) as? [IOHIDElement] else {
+            return [AxisID(page: 1, usage: 0x30), AxisID(page: 1, usage: 0x31),
+                    AxisID(page: 1, usage: 0x32), AxisID(page: 1, usage: 0x35)]
+        }
+        var axes = Set<AxisID>()
+        for elem in elements {
+            let type = IOHIDElementGetType(elem)
+            guard type == kIOHIDElementTypeInput_Axis || type == kIOHIDElementTypeInput_Misc else { continue }
+            let page = Int(IOHIDElementGetUsagePage(elem))
+            let usage = Int(IOHIDElementGetUsage(elem))
+            if page == 1 && usage >= 0x30 && usage <= 0x38 {
+                axes.insert(AxisID(page: page, usage: usage))
+            } else if page == 2 && usage >= 0xC4 && usage <= 0xC6 {
+                axes.insert(AxisID(page: page, usage: usage))
+            }
+        }
+        return axes.isEmpty ? [AxisID(page: 1, usage: 0x30), AxisID(page: 1, usage: 0x31),
+                               AxisID(page: 1, usage: 0x32), AxisID(page: 1, usage: 0x35)] : axes.sorted()
+    }
+
+    private func hasSeparateRyAxis(device: IOHIDDevice?) -> Bool {
+        deviceAxisList(device: device).contains(AxisID(page: 1, usage: 0x34))
+    }
+
+    private func handleTriggerCalibration(page: Int, usage: Int, value: Double) {
+        guard calibrating, let dev = currentDevice else { return }
+        let currentAxis = AxisID(page: page, usage: usage)
+        if currentStep == .lt {
             if value > 0.5 {
                 triggerArmed = true
+                triggerAxis = currentAxis
             } else if value < 0.2 && triggerArmed {
                 triggerArmed = false
-                if let axis { capturedMapping["lefttrigger"] = axis }
+                let axes = deviceAxisList(device: dev.device)
+                let target = triggerAxis.page > 0 ? triggerAxis : currentAxis
+                let idx = axes.firstIndex(of: target) ?? (axes.count > 4 ? 5 : 2)
+                capturedMapping["lefttrigger"] = "a\(idx)"
+                triggerAxis = AxisID(page: 0, usage: 0)
                 currentStep = .rt
                 stepArmedTime = Date()
             }
-        } else if !isLeft && currentStep == .rt {
+        } else if currentStep == .rt {
             if value > 0.5 {
                 triggerArmed = true
+                triggerAxis = currentAxis
             } else if value < 0.2 && triggerArmed {
                 triggerArmed = false
-                if let axis { capturedMapping["righttrigger"] = axis }
+                let axes = deviceAxisList(device: dev.device)
+                let target = triggerAxis.page > 0 ? triggerAxis : currentAxis
+                let idx = axes.firstIndex(of: target) ?? (axes.count > 5 ? 4 : 5)
+                capturedMapping["righttrigger"] = "a\(idx)"
+                triggerAxis = AxisID(page: 0, usage: 0)
                 currentStep = .back
                 canAdvanceStep = false
                 awaitingButtonRelease = false
@@ -529,42 +614,26 @@ final class ControllerManager: ObservableObject {
         }
     }
 
-    private func deviceAxisUsages(device: IOHIDDevice) -> [Int] {
-        let matching: [String: Any] = [
-            kIOHIDElementUsagePageKey as String: kHIDPage_GenericDesktop
-        ]
-        guard let elements = IOHIDDeviceCopyMatchingElements(device, matching as CFDictionary, 0) as? [IOHIDElement] else {
-            return [0x30, 0x31, 0x32, 0x35]
-        }
-        var usages = Set<Int>()
-        for elem in elements {
-            let type = IOHIDElementGetType(elem)
-            let usage = Int(IOHIDElementGetUsage(elem))
-            if (type == kIOHIDElementTypeInput_Axis || type == kIOHIDElementTypeInput_Misc) && usage >= 0x30 && usage <= 0x36 {
-                usages.insert(usage)
-            }
-        }
-        return usages.isEmpty ? [0x30, 0x31, 0x32, 0x35] : usages.sorted()
-    }
-
-    private func handleStickCalibration(usage: Int, pos: Double) {
+    private func handleStickCalibration(page: Int, usage: Int, pos: Double) {
         guard calibrating, let dev = currentDevice else { return }
+        let currentAxis = AxisID(page: page, usage: usage)
         if currentStep == .lup {
             if abs(pos) > 0.6 {
                 stickArmed = true
                 if abs(pos) > abs(stickPeak) {
                     stickPeak = pos
-                    stickUsage = usage
+                    stickAxis = currentAxis
                 }
             } else if abs(pos) < 0.25 && stickArmed {
                 stickArmed = false
-                let usages = deviceAxisUsages(device: dev.device)
-                let yIndex = usages.firstIndex(of: stickUsage > 0 ? stickUsage : 0x31) ?? 1
-                let xIndex = usages.firstIndex(of: 0x30) ?? 0
+                let axes = deviceAxisList(device: dev.device)
+                let yAxis = stickAxis.page > 0 ? stickAxis : currentAxis
+                let yIndex = axes.firstIndex(of: yAxis) ?? 1
+                let xIndex = axes.firstIndex(of: AxisID(page: 1, usage: 0x30)) ?? 0
                 capturedMapping["leftx"] = "a\(xIndex)"
                 capturedMapping["lefty"] = "a\(yIndex)\(stickPeak > 0 ? "~" : "")"
                 stickPeak = 0.0
-                stickUsage = 0
+                stickAxis = AxisID(page: 0, usage: 0)
                 currentStep = .r3
                 canAdvanceStep = false
                 awaitingButtonRelease = false
@@ -578,18 +647,19 @@ final class ControllerManager: ObservableObject {
                 stickArmed = true
                 if abs(pos) > abs(stickPeak) {
                     stickPeak = pos
-                    stickUsage = usage
+                    stickAxis = currentAxis
                 }
             } else if abs(pos) < 0.25 && stickArmed {
                 stickArmed = false
-                let usages = deviceAxisUsages(device: dev.device)
-                let yIndex = usages.firstIndex(of: stickUsage > 0 ? stickUsage : 0x35) ?? (usages.count > 4 ? 4 : 3)
-                let xUsage = (stickUsage == 0x34) ? 0x33 : 0x32
-                let xIndex = usages.firstIndex(of: xUsage) ?? (yIndex - 1)
+                let axes = deviceAxisList(device: dev.device)
+                let yAxis = stickAxis.page > 0 ? stickAxis : currentAxis
+                let yIndex = axes.firstIndex(of: yAxis) ?? (axes.count > 4 ? 4 : 3)
+                let xUsage = (yAxis.usage == 0x34) ? 0x33 : 0x32
+                let xIndex = axes.firstIndex(of: AxisID(page: 1, usage: xUsage)) ?? (yIndex - 1)
                 capturedMapping["rightx"] = "a\(xIndex)"
                 capturedMapping["righty"] = "a\(yIndex)\(stickPeak > 0 ? "~" : "")"
                 stickPeak = 0.0
-                stickUsage = 0
+                stickAxis = AxisID(page: 0, usage: 0)
                 finishCalibration()
             }
         }
@@ -604,6 +674,8 @@ final class ControllerManager: ObservableObject {
         if capturedMapping["lefty"] == nil { capturedMapping["lefty"] = activeMapping["lefty"] ?? "a1" }
         if capturedMapping["rightx"] == nil { capturedMapping["rightx"] = activeMapping["rightx"] ?? "a2" }
         if capturedMapping["righty"] == nil { capturedMapping["righty"] = activeMapping["righty"] ?? "a3" }
+        if capturedMapping["lefttrigger"] == nil { capturedMapping["lefttrigger"] = activeMapping["lefttrigger"] ?? "a5" }
+        if capturedMapping["righttrigger"] == nil { capturedMapping["righttrigger"] = activeMapping["righttrigger"] ?? "a4" }
         saveMapping()
         currentStep = .done
         calibrating = false
@@ -649,9 +721,10 @@ final class ControllerManager: ObservableObject {
         canAdvanceStep = true
         awaitingButtonRelease = false
         triggerArmed = false
+        triggerAxis = AxisID(page: 0, usage: 0)
         stickArmed = false
         stickPeak = 0.0
-        stickUsage = 0
+        stickAxis = AxisID(page: 0, usage: 0)
         stepArmedTime = Date()
         statusMessage = nil
     }
@@ -661,9 +734,10 @@ final class ControllerManager: ObservableObject {
         canAdvanceStep = true
         awaitingButtonRelease = false
         triggerArmed = false
+        triggerAxis = AxisID(page: 0, usage: 0)
         stickArmed = false
         stickPeak = 0.0
-        stickUsage = 0
+        stickAxis = AxisID(page: 0, usage: 0)
         stepArmedTime = Date()
 
         switch currentStep {
@@ -734,7 +808,17 @@ final class ControllerManager: ObservableObject {
             .map { "\($0.key):\($0.value)" }
             .joined(separator: ",")
         let safeName = current.name.replacingOccurrences(of: ",", with: " ")
-        let line = "\(current.guid),\(safeName),\(mapEntries),platform:Mac OS X,\n"
+        let wildcardGuid = sdlWildcardGuid(vendorId: current.vendorId, productId: current.productId)
+        var newLines = ["\(wildcardGuid),\(safeName),\(mapEntries),platform:Mac OS X,\n"]
+        var guidsToRemove = [wildcardGuid]
+        if current.versionNumber != 0 {
+            let verGuid = sdlGuid(vendorId: current.vendorId, productId: current.productId, version: current.versionNumber)
+            if verGuid != wildcardGuid {
+                newLines.append("\(verGuid),\(safeName),\(mapEntries),platform:Mac OS X,\n")
+                guidsToRemove.append(verGuid)
+            }
+        }
+        let addedText = newLines.joined()
 
         // Calibrations live in ~/Games/ProjectReclaimer/controller-mappings.txt so installer updates never touch them
         let baseDir = URL(fileURLWithPath: (ProcessInfo.processInfo.environment["RECLAIMER_HOME"]
@@ -742,10 +826,23 @@ final class ControllerManager: ObservableObject {
         let userMappingsPath = baseDir.appendingPathComponent("controller-mappings.txt")
 
         if let existing = try? String(contentsOf: userMappingsPath, encoding: .utf8) {
-            let filtered = existing.components(separatedBy: .newlines).filter { !$0.starts(with: current.guid) && !$0.isEmpty }.joined(separator: "\n")
-            try? (filtered.isEmpty ? line : filtered + "\n" + line).write(to: userMappingsPath, atomically: true, encoding: .utf8)
+            let filtered = existing.components(separatedBy: .newlines).filter { line in
+                !guidsToRemove.contains { line.starts(with: $0) } && !line.isEmpty
+            }.joined(separator: "\n")
+            try? (filtered.isEmpty ? addedText : filtered + "\n" + addedText).write(to: userMappingsPath, atomically: true, encoding: .utf8)
         } else {
-            try? line.write(to: userMappingsPath, atomically: true, encoding: .utf8)
+            try? addedText.write(to: userMappingsPath, atomically: true, encoding: .utf8)
+        }
+
+        // Refresh controller-mappings-active.txt so active mappings exist immediately for Wine
+        let activePath = baseDir.appendingPathComponent("controller-mappings-active.txt")
+        let bundledPath = baseDir.appendingPathComponent("game/gamecontrollerdb.txt")
+        var merged = (try? String(contentsOf: bundledPath, encoding: .utf8)) ?? ""
+        if let userText = try? String(contentsOf: userMappingsPath, encoding: .utf8) {
+            merged += (merged.isEmpty ? "" : "\n") + userText
+        }
+        if !merged.isEmpty {
+            try? merged.write(to: activePath, atomically: true, encoding: .utf8)
         }
     }
 }
@@ -1085,9 +1182,14 @@ struct ControllerSheet: View {
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                         .fixedSize(horizontal: false, vertical: true)
-                                } else {
+                                } else if dev.canRemap {
                                     Text("Controller Mapping").font(.subheadline.bold())
                                     Text("Controls feel swapped or inverted? Run calibration for Player \(c.selectedPlayerIndex + 1).")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                } else {
+                                    Text("Controller Mapping").font(.subheadline.bold())
+                                    Text("This controller is already supported by the game.")
                                         .font(.caption).foregroundStyle(.secondary)
                                         .fixedSize(horizontal: false, vertical: true)
                                 }
@@ -1101,10 +1203,14 @@ struct ControllerSheet: View {
                                     Button("Cancel") { c.calibrating = false }
                                         .controlSize(.regular)
                                 }
-                            } else {
+                            } else if dev.canRemap {
                                 Button("Remap Player \(c.selectedPlayerIndex + 1)") { c.startCalibration() }
                                     .buttonStyle(.borderedProminent)
                                     .tint(accent)
+                            } else {
+                                Text("Supported by game")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
                             }
                         }
 

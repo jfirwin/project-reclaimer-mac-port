@@ -112,6 +112,18 @@ joining a server, paste its Steam Workshop link into the window.
 The first match builds a Forge cache (about a minute). Change graphics in the game's own Settings; updates keep them.
 To put back the tuned defaults, run the install command with `RECLAIMER_RESET_GRAPHICS=1 ` in front of it.
 
+## What the game can see
+
+Since 1.5.0 the game runs inside a macOS sandbox, so a bad game release or a server exploiting a game bug can't
+reach the rest of your Mac:
+- **Inside:** it reads only its own folders in `~/Games/ProjectReclaimer` (Wine, the game, and the Windows folder Halo
+  and its saves live in), and writes only to that Windows folder.
+- **Outside:** your documents, keys, browser data and other drives are off limits. So are the install's own scripts,
+  which run outside the sandbox later.
+- **Also blocked:** starting other apps or scripting them, which would be a way out.
+
+The game's log (`~/Games/ProjectReclaimer/logs/client-wine.log`) starts with `sandbox: on`.
+
 ## Troubleshooting
 
 | Problem | Fix |
@@ -129,6 +141,7 @@ To put back the tuned defaults, run the install command with `RECLAIMER_RESET_GR
 | "This game is Halo 3: ODST, which isn't installed" | Tools → **Installed games** → **Add** next to Halo 3: ODST (about 9 GB). |
 | "This halo3odst.dll is not the ODST build this release supports" | Tools → **Installed games** → **Repair** next to Halo 3: ODST: it brings its files up to Steam's current version. |
 | Game frozen and won't close | Tools → **Force Quit**. |
+| Something stopped working in 1.5.0 (e.g. a link in the game doesn't open) | Possibly the sandbox (see *What the game can see*). To check, quit the game, run `RECLAIMER_NO_SANDBOX=1 ~/Games/ProjectReclaimer/game/launch.sh` in Terminal and try again. If it works that way, open an issue with Tools → **Make Report**. |
 | Something else | Tools → **Make Report**, and send the zip it puts on your Desktop. Logs are in `~/Games/ProjectReclaimer/logs/`. |
 
 ## Uninstall

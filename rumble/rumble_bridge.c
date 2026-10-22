@@ -52,7 +52,6 @@ static void rumble_8bitdo(IOHIDDeviceRef dev, uint8_t left, uint8_t right, uint3
     pkt[3] = left >> 1;
     pkt[4] = right >> 1;
 
-    IOHIDDeviceOpen(dev, kIOHIDOptionsTypeNone);
     IOHIDDeviceSetReport(dev, kIOHIDReportTypeOutput, 0x05, pkt, sizeof(pkt));
 }
 
@@ -107,6 +106,19 @@ static int compare_devices(const void* a, const void* b) {
     return (loc_a < loc_b) ? -1 : (loc_a > loc_b) ? 1 : 0;
 }
 
+static void on_device_removed(void* context, IOReturn result, void* sender, IOHIDDeviceRef dev) {
+    (void)context; (void)result; (void)sender;
+    for (int i = 0; i < MAX_SLOTS; i++) {
+        if (g_slots[i].dev == dev) {
+            g_slots[i].dev = NULL;
+            g_slots[i].joystick = NULL;
+            g_slots[i].last_left = 0xFF;
+            g_slots[i].last_right = 0xFF;
+            g_slots[i].generation++;
+        }
+    }
+}
+
 static void init_hid_manager(void) {
     if (g_mgr) return;
     g_mgr = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone);
@@ -139,6 +151,8 @@ static void init_hid_manager(void) {
     IOHIDManagerSetDeviceMatchingMultiple(g_mgr, matching_arr);
     CFRelease(matching_arr);
 
+    IOHIDManagerRegisterDeviceRemovalCallback(g_mgr, on_device_removed, NULL);
+    IOHIDManagerScheduleWithRunLoop(g_mgr, CFRunLoopGetMain(), kCFRunLoopDefaultMode);
     IOHIDManagerOpen(g_mgr, kIOHIDOptionsTypeNone);
 }
 
@@ -171,6 +185,12 @@ static void refresh_devices(void) {
         g_active_devices[g_active_count] = devs[i];
         CFRetain(g_active_devices[g_active_count]);
         IOHIDDeviceOpen(g_active_devices[g_active_count], kIOHIDOptionsTypeNone);
+
+        // Prime the device report so IOHID element cache is populated with true centers (LX=128, LY=128, Hat=8)
+        uint8_t prime_buf[64] = {0};
+        CFIndex prime_len = sizeof(prime_buf);
+        IOHIDDeviceGetReport(g_active_devices[g_active_count], kIOHIDReportTypeInput, 0x01, prime_buf, &prime_len);
+
         g_active_count++;
     }
     CFRelease(set);
@@ -204,6 +224,12 @@ extern uint16_t SDL_JoystickGetProduct(void* joystick);
 extern const char* SDL_JoystickGetSerial(void* joystick);
 extern int SDL_JoystickGetPlayerIndex(void* joystick);
 extern void* SDL_GameControllerGetJoystick(void* controller);
+extern void SDL_JoystickClose(void* joystick);
+extern void SDL_GameControllerClose(void* controller);
+extern void* SDL_JoystickOpen(int device_index);
+extern void* SDL_GameControllerOpen(int device_index);
+extern void SDL_PumpEvents(void);
+extern int SDL_WaitEventTimeout(void* event, int timeout);
 extern int SDL_JoystickRumble(void* joystick, uint16_t low, uint16_t high, uint32_t duration_ms);
 extern int SDL_GameControllerRumble(void* controller, uint16_t low, uint16_t high, uint32_t duration_ms);
 
@@ -224,7 +250,15 @@ static int find_slot(void* joystick, uint16_t vid, uint16_t pid) {
     // 1. Check existing pairing (fast path)
     for (int i = 0; i < MAX_SLOTS; i++) {
         if (g_slots[i].joystick == joystick && g_slots[i].dev != NULL) {
-            return i;
+            if (get_device_num_prop(g_slots[i].dev, CFSTR(kIOHIDVendorIDKey)) == vid) {
+                return i;
+            }
+            // Stale dead handle on reconnect
+            g_slots[i].dev = NULL;
+            g_slots[i].joystick = NULL;
+            g_slots[i].last_left = 0xFF;
+            g_slots[i].last_right = 0xFF;
+            g_slots[i].generation++;
         }
     }
 
@@ -294,11 +328,10 @@ static int find_slot(void* joystick, uint16_t vid, uint16_t pid) {
                     if (g_slots[s].joystick == joystick) { slot_idx = s; break; }
                     if (slot_idx < 0 && g_slots[s].joystick == NULL) { slot_idx = s; }
                 }
-                if (slot_idx >= 0) {
-                    g_slots[slot_idx].joystick = joystick;
-                    g_slots[slot_idx].dev = dev;
-                    return slot_idx;
-                }
+                if (slot_idx < 0) { slot_idx = 0; }
+                g_slots[slot_idx].joystick = joystick;
+                g_slots[slot_idx].dev = dev;
+                return slot_idx;
             }
         }
     }
@@ -369,14 +402,79 @@ int my_SDL_GameControllerRumble(void* controller, uint16_t low, uint16_t high, u
     return my_SDL_JoystickRumble(joy, low, high, duration_ms);
 }
 
+void my_SDL_JoystickClose(void* joystick) {
+    if (joystick) {
+        for (int i = 0; i < MAX_SLOTS; i++) {
+            if (g_slots[i].joystick == joystick) {
+                g_slots[i].joystick = NULL;
+                g_slots[i].dev = NULL;
+                g_slots[i].last_left = 0xFF;
+                g_slots[i].last_right = 0xFF;
+                g_slots[i].generation++;
+            }
+        }
+    }
+    SDL_JoystickClose(joystick);
+}
+
+void my_SDL_GameControllerClose(void* controller) {
+    void* joy = controller ? SDL_GameControllerGetJoystick(controller) : NULL;
+    if (joy) {
+        my_SDL_JoystickClose(joy);
+    }
+    SDL_GameControllerClose(controller);
+}
+
+void* my_SDL_JoystickOpen(int device_index) {
+    void* joy = SDL_JoystickOpen(device_index);
+    if (joy) {
+        // ponytail: pump initial hardware reports so Wine does not read uninitialized axis values
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.02, false);
+        SDL_PumpEvents();
+    }
+    return joy;
+}
+
+void* my_SDL_GameControllerOpen(int device_index) {
+    void* gc = SDL_GameControllerOpen(device_index);
+    if (gc) {
+        // ponytail: pump initial hardware reports so Wine does not read uninitialized axis values
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.02, false);
+        SDL_PumpEvents();
+    }
+    return gc;
+}
+
+int my_SDL_WaitEventTimeout(void* event, int timeout) {
+    int res = SDL_WaitEventTimeout(event, timeout);
+    if (res && event) {
+        uint32_t type = *(uint32_t*)event;
+        // 0x605 = SDL_JOYDEVICEADDED, 0x606 = SDL_JOYDEVICEREMOVED
+        if (type == 0x605 || type == 0x606) {
+            refresh_devices();
+        }
+    }
+    return res;
+}
+
 void* my_dlsym(void* handle, const char* symbol) {
     if (symbol) {
         if (strcmp(symbol, "SDL_JoystickRumble") == 0) return (void*)my_SDL_JoystickRumble;
         if (strcmp(symbol, "SDL_GameControllerRumble") == 0) return (void*)my_SDL_GameControllerRumble;
+        if (strcmp(symbol, "SDL_JoystickClose") == 0) return (void*)my_SDL_JoystickClose;
+        if (strcmp(symbol, "SDL_GameControllerClose") == 0) return (void*)my_SDL_GameControllerClose;
+        if (strcmp(symbol, "SDL_JoystickOpen") == 0) return (void*)my_SDL_JoystickOpen;
+        if (strcmp(symbol, "SDL_GameControllerOpen") == 0) return (void*)my_SDL_GameControllerOpen;
+        if (strcmp(symbol, "SDL_WaitEventTimeout") == 0) return (void*)my_SDL_WaitEventTimeout;
     }
     return dlsym(handle, symbol);
 }
 
 DYLD_INTERPOSE(my_SDL_JoystickRumble, SDL_JoystickRumble)
 DYLD_INTERPOSE(my_SDL_GameControllerRumble, SDL_GameControllerRumble)
+DYLD_INTERPOSE(my_SDL_JoystickClose, SDL_JoystickClose)
+DYLD_INTERPOSE(my_SDL_GameControllerClose, SDL_GameControllerClose)
+DYLD_INTERPOSE(my_SDL_JoystickOpen, SDL_JoystickOpen)
+DYLD_INTERPOSE(my_SDL_GameControllerOpen, SDL_GameControllerOpen)
+DYLD_INTERPOSE(my_SDL_WaitEventTimeout, SDL_WaitEventTimeout)
 DYLD_INTERPOSE(my_dlsym, dlsym)

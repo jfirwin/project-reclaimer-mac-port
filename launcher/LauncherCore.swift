@@ -658,6 +658,29 @@ func sdlWildcardGuid(vendorId: Int, productId: Int) -> String {
     sdlGuid(vendorId: vendorId, productId: productId, version: 0)
 }
 
+/// The flag file that asks Wine's SDL to use the positional Xbox layout (bottom=A/jump) for Nintendo controllers.
+func nintendoXboxLayoutFlag(home: URL) -> URL {
+    home.appendingPathComponent("nintendo-xbox-layout")
+}
+
+/// Whether the player has chosen the positional Xbox layout for Nintendo controllers.
+func isNintendoXboxLayout(home: URL) -> Bool {
+    FileManager.default.fileExists(atPath: nintendoXboxLayoutFlag(home: home).path)
+        || FileManager.default.fileExists(atPath: home.appendingPathComponent("nintendo-layout").path)
+}
+
+/// Set or clear the positional Xbox layout flag for Nintendo controllers.
+func setNintendoXboxLayout(_ enabled: Bool, home: URL) {
+    let flag = nintendoXboxLayoutFlag(home: home)
+    let alt = home.appendingPathComponent("nintendo-layout")
+    if enabled {
+        try? "".write(to: flag, atomically: true, encoding: .utf8)
+    } else {
+        try? FileManager.default.removeItem(at: flag)
+        try? FileManager.default.removeItem(at: alt)
+    }
+}
+
 // MARK: - memory
 
 /// RAM in whole GiB, as fit.py counts it (sysctl hw.memsize // 2**30).

@@ -24,7 +24,7 @@ class RunTest(unittest.TestCase):
             (game / exe).write_bytes(b"MZ")
         wine = self.home / "wine" / "Wine Staging.app" / "Contents" / "Resources" / "wine" / "bin" / "wine"
         wine.parent.mkdir(parents=True)
-        wine.write_text('#!/bin/sh\necho "cwd=$(pwd) exe=$1 mode=$2 cfgfile=$SDL_GAMECONTROLLERCONFIG_FILE cfgstr=$SDL_GAMECONTROLLERCONFIG"\n')
+        wine.write_text('#!/bin/sh\necho "cwd=$(pwd) exe=$1 mode=$2 cfgfile=$SDL_GAMECONTROLLERCONFIG_FILE cfgstr=$SDL_GAMECONTROLLERCONFIG labels=$SDL_GAMECONTROLLER_USE_BUTTON_LABELS"\n')
         wine.chmod(0o755)
 
     def tearDown(self):
@@ -85,6 +85,21 @@ class RunTest(unittest.TestCase):
         self.assertIn("cfgfile=", out)
         self.assertNotIn("cfgfile=/", out)
         self.assertFalse((self.home / "controller-mappings-active.txt").exists())
+
+    def test_nintendo_xbox_layout_flag_exports_use_button_labels_zero(self):
+        (self.home / "nintendo-xbox-layout").write_text("")
+        out = self.run_game()
+        self.assertIn("labels=0", out)
+
+    def test_nintendo_layout_fallback_flag_exports_use_button_labels_zero(self):
+        (self.home / "nintendo-layout").write_text("")
+        out = self.run_game()
+        self.assertIn("labels=0", out)
+
+    def test_no_nintendo_layout_flag_leaves_button_labels_unset(self):
+        out = self.run_game()
+        self.assertIn("labels=", out)
+        self.assertNotIn("labels=0", out)
 
 
 class LaunchTest(unittest.TestCase):

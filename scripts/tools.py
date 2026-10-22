@@ -640,6 +640,8 @@ def game_env():
     db = controller_mappings_file()
     if db:
         env["SDL_GAMECONTROLLERCONFIG_FILE"] = db
+    if (BASE / "nintendo-xbox-layout").is_file() or (BASE / "nintendo-layout").is_file():
+        env["SDL_GAMECONTROLLER_USE_BUTTON_LABELS"] = "0"
     return env
 
 

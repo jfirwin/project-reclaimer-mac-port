@@ -17,6 +17,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <dlfcn.h>
+#include <pthread.h>
 #include <dispatch/dispatch.h>
 #include <IOKit/IOKitLib.h>
 #include <IOKit/hid/IOHIDManager.h>
@@ -71,6 +72,7 @@ typedef struct {
     uint32_t generation;
 } DeviceSlot;
 
+static pthread_mutex_t g_bridge_lock = PTHREAD_RECURSIVE_MUTEX_INITIALIZER;
 static IOHIDManagerRef g_mgr = NULL;
 static IOHIDDeviceRef g_active_devices[MAX_SLOTS] = { NULL };
 static int g_active_count = 0;
@@ -108,6 +110,7 @@ static int compare_devices(const void* a, const void* b) {
 
 static void on_device_removed(void* context, IOReturn result, void* sender, IOHIDDeviceRef dev) {
     (void)context; (void)result; (void)sender;
+    pthread_mutex_lock(&g_bridge_lock);
     for (int i = 0; i < MAX_SLOTS; i++) {
         if (g_slots[i].dev == dev) {
             g_slots[i].dev = NULL;
@@ -117,6 +120,7 @@ static void on_device_removed(void* context, IOReturn result, void* sender, IOHI
             g_slots[i].generation++;
         }
     }
+    pthread_mutex_unlock(&g_bridge_lock);
 }
 
 static void init_hid_manager(void) {
@@ -157,13 +161,18 @@ static void init_hid_manager(void) {
 }
 
 static void refresh_devices(void) {
+    pthread_mutex_lock(&g_bridge_lock);
     init_hid_manager();
-    if (!g_mgr) return;
+    if (!g_mgr) {
+        pthread_mutex_unlock(&g_bridge_lock);
+        return;
+    }
 
     CFSetRef set = IOHIDManagerCopyDevices(g_mgr);
 
     for (int i = 0; i < g_active_count; i++) {
         if (g_active_devices[i]) {
+            IOHIDDeviceClose(g_active_devices[i], kIOHIDOptionsTypeNone);
             CFRelease(g_active_devices[i]);
             g_active_devices[i] = NULL;
         }
@@ -174,6 +183,7 @@ static void refresh_devices(void) {
         for (int i = 0; i < MAX_SLOTS; i++) {
             g_slots[i].dev = NULL;
         }
+        pthread_mutex_unlock(&g_bridge_lock);
         return;
     }
 
@@ -217,12 +227,12 @@ static void refresh_devices(void) {
             }
         }
     }
+    pthread_mutex_unlock(&g_bridge_lock);
 }
 
 extern uint16_t SDL_JoystickGetVendor(void* joystick);
 extern uint16_t SDL_JoystickGetProduct(void* joystick);
 extern const char* SDL_JoystickGetSerial(void* joystick);
-extern int SDL_JoystickGetPlayerIndex(void* joystick);
 extern void* SDL_GameControllerGetJoystick(void* controller);
 extern void SDL_JoystickClose(void* joystick);
 extern void SDL_GameControllerClose(void* controller);
@@ -291,26 +301,7 @@ static int find_slot(void* joystick, uint16_t vid, uint16_t pid) {
         }
     }
 
-    // 4. Match by player index among active devices
-    int player = SDL_JoystickGetPlayerIndex(joystick);
-    if (player >= 0 && player < g_active_count) {
-        IOHIDDeviceRef dev = g_active_devices[player];
-        if (get_device_num_prop(dev, CFSTR(kIOHIDVendorIDKey)) == vid &&
-            get_device_num_prop(dev, CFSTR(kIOHIDProductIDKey)) == pid) {
-            int slot_idx = -1;
-            for (int s = 0; s < MAX_SLOTS; s++) {
-                if (g_slots[s].joystick == joystick) { slot_idx = s; break; }
-                if (slot_idx < 0 && g_slots[s].joystick == NULL) { slot_idx = s; }
-            }
-            if (slot_idx >= 0) {
-                g_slots[slot_idx].joystick = joystick;
-                g_slots[slot_idx].dev = dev;
-                return slot_idx;
-            }
-        }
-    }
-
-    // 5. Fallback: match first unassigned active device with matching VID/PID
+    // 4. Fallback: match first unassigned active device with matching VID/PID
     for (int i = 0; i < g_active_count; i++) {
         IOHIDDeviceRef dev = g_active_devices[i];
         if (get_device_num_prop(dev, CFSTR(kIOHIDVendorIDKey)) == vid &&
@@ -348,6 +339,7 @@ int my_SDL_JoystickRumble(void* joystick, uint16_t low, uint16_t high, uint32_t 
         uint8_t left = (uint8_t)(low >> 8);
         uint8_t right = (uint8_t)(high >> 8);
 
+        pthread_mutex_lock(&g_bridge_lock);
         int slot = find_slot(joystick, vid, pid);
         if (slot >= 0 && g_slots[slot].dev != NULL) {
             IOHIDDeviceRef dev = g_slots[slot].dev;
@@ -362,11 +354,13 @@ int my_SDL_JoystickRumble(void* joystick, uint16_t low, uint16_t high, uint32_t 
                     g_slots[slot].last_right = 0;
                     driver->send_rumble(dev, 0, 0, 0);
                 }
+                pthread_mutex_unlock(&g_bridge_lock);
                 return 0;
             }
 
             // Deduplicate: drop identical repeat frames while holding continuous fire
             if (left == g_slots[slot].last_left && right == g_slots[slot].last_right) {
+                pthread_mutex_unlock(&g_bridge_lock);
                 return 0;
             }
 
@@ -377,17 +371,23 @@ int my_SDL_JoystickRumble(void* joystick, uint16_t low, uint16_t high, uint32_t 
 
             // Safety net: stop motors when duration expires if game does not send explicit stop
             if (duration_ms > 0) {
+                CFRetain(dev);
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)duration_ms * NSEC_PER_MSEC),
                                dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+                    pthread_mutex_lock(&g_bridge_lock);
                     if (g_slots[slot].generation == current_gen && g_slots[slot].dev == dev) {
                         g_slots[slot].last_left = 0;
                         g_slots[slot].last_right = 0;
                         driver->send_rumble(dev, 0, 0, 0);
                     }
+                    pthread_mutex_unlock(&g_bridge_lock);
+                    CFRelease(dev);
                 });
             }
+            pthread_mutex_unlock(&g_bridge_lock);
             return 0;
         }
+        pthread_mutex_unlock(&g_bridge_lock);
 
         // Return success for supported driver on startup probe
         return 0;
@@ -404,6 +404,7 @@ int my_SDL_GameControllerRumble(void* controller, uint16_t low, uint16_t high, u
 
 void my_SDL_JoystickClose(void* joystick) {
     if (joystick) {
+        pthread_mutex_lock(&g_bridge_lock);
         for (int i = 0; i < MAX_SLOTS; i++) {
             if (g_slots[i].joystick == joystick) {
                 g_slots[i].joystick = NULL;
@@ -413,6 +414,7 @@ void my_SDL_JoystickClose(void* joystick) {
                 g_slots[i].generation++;
             }
         }
+        pthread_mutex_unlock(&g_bridge_lock);
     }
     SDL_JoystickClose(joystick);
 }

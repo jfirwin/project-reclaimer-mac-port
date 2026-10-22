@@ -92,7 +92,6 @@ class RunTest(unittest.TestCase):
         self.assertNotIn("cfgfile=/", out)
         self.assertFalse((self.home / "controller-mappings-active.txt").exists())
 
-<<<<<<< HEAD
     def test_nintendo_xbox_layout_flag_exports_use_button_labels_zero(self):
         (self.home / "nintendo-xbox-layout").write_text("")
         out = self.run_game()
@@ -102,38 +101,6 @@ class RunTest(unittest.TestCase):
         out = self.run_game()
         self.assertIn("labels=", out)
         self.assertNotIn("labels=0", out)
-=======
-    def test_rumble_bridge_injection_scoped_to_x86_64(self):
-        wine_dir = self.home / "wine" / "Wine Staging.app" / "Contents" / "Resources" / "wine"
-        (wine_dir / "lib").mkdir(parents=True, exist_ok=True)
-        bridge = wine_dir / "lib" / "librumble_bridge.dylib"
-
-        def probe(extra_env=None):
-            env = dict(os.environ, RECLAIMER_HOME=str(self.home))
-            if extra_env:
-                env.update(extra_env)
-            cmd = 'exec() { echo "insert=$DYLD_INSERT_LIBRARIES"; }; source ' + str(self.home / "game" / "run.sh")
-            p = subprocess.run(["/bin/zsh", "-c", cmd], capture_output=True, text=True, env=env, timeout=30)
-            if p.returncode != 0:
-                self.fail(f"run.sh failed (rc={p.returncode}): {p.stderr.strip()}")
-            return p.stdout.strip()
-
-        # 1. Without dylib: no insertion
-        self.assertEqual(probe(), "insert=")
-
-        # 2. With wrong architecture (arm64): not inserted (prevents dyld abort)
-        subprocess.run(["clang", "-arch", "arm64", "-dynamiclib", "-x", "c", "/dev/null", "-o", str(bridge)], check=True)
-        self.assertEqual(probe(), "insert=")
-
-        # 3. With matching architecture (x86_64): inserted
-        subprocess.run(["clang", "-arch", "x86_64", "-dynamiclib", "-x", "c", "/dev/null", "-o", str(bridge)], check=True)
-        self.assertEqual(probe(), f"insert={bridge}")
-
-        # 4. Caller has an arm64 dylib in environment (simulating ~/.zshenv): stripped by unset, only x86_64 bridge is injected
-        shim = self.home / "arm64_shim.dylib"
-        subprocess.run(["clang", "-arch", "arm64", "-dynamiclib", "-x", "c", "/dev/null", "-o", str(shim)], check=True)
-        self.assertEqual(probe(extra_env={"DYLD_INSERT_LIBRARIES": str(shim)}), f"insert={bridge}")
->>>>>>> d908dd5 (Controller: targeted rumble bridge with hotplugging and scoped injection)
 
 
 class LaunchTest(unittest.TestCase):

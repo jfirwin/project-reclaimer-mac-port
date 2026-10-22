@@ -84,6 +84,55 @@ class SandboxTest(unittest.TestCase):
         self.assertIn("sandbox: off", p.stderr)
         self.assertEqual(p.stdout, "private")
 
+    def test_rumble_bridge_injected_only_for_wine_when_x86_64(self):
+        wine_bin = self.home / "wine" / "wine"
+        wineserver = self.home / "wine" / "wineserver"
+        wine_c = (
+            '#include <stdio.h>\n'
+            '#include <stdlib.h>\n'
+            'int main() { printf("insert=%s\\n", getenv("DYLD_INSERT_LIBRARIES") ? getenv("DYLD_INSERT_LIBRARIES") : ""); return 0; }\n'
+        )
+        subprocess.run(["clang", "-arch", "x86_64", "-x", "c", "-", "-o", str(wine_bin)], input=wine_c, text=True, check=True)
+        subprocess.run(["clang", "-arch", "x86_64", "-x", "c", "-", "-o", str(wineserver)], input=wine_c, text=True, check=True)
+
+        lib_dir = self.home / "wine" / "Wine Staging.app" / "Contents" / "Resources" / "wine" / "lib"
+        lib_dir.mkdir(parents=True, exist_ok=True)
+        bridge = lib_dir / "librumble_bridge.dylib"
+
+        # 1. Without dylib: no insertion (both no-sandbox and sandbox)
+        p = self.sandboxed(str(wine_bin), RECLAIMER_NO_SANDBOX="1")
+        self.assertEqual(p.stdout.strip(), "insert=")
+        p = self.sandboxed(str(wine_bin))
+        self.assertEqual(p.stdout.strip(), "insert=")
+
+        # 2. With wrong architecture (arm64): not inserted (prevents dyld abort)
+        subprocess.run(["clang", "-arch", "arm64", "-dynamiclib", "-x", "c", "/dev/null", "-o", str(bridge)], check=True)
+        p = self.sandboxed(str(wine_bin), RECLAIMER_NO_SANDBOX="1")
+        self.assertEqual(p.stdout.strip(), "insert=")
+        p = self.sandboxed(str(wine_bin))
+        self.assertEqual(p.stdout.strip(), "insert=")
+
+        # 3. With matching architecture (x86_64): inserted for wine (both no-sandbox and sandbox)
+        subprocess.run(["clang", "-arch", "x86_64", "-dynamiclib", "-x", "c", "/dev/null", "-o", str(bridge)], check=True)
+        p = self.sandboxed(str(wine_bin), RECLAIMER_NO_SANDBOX="1")
+        self.assertEqual(p.stdout.strip(), f"insert={bridge}")
+        p = self.sandboxed(str(wine_bin))
+        self.assertEqual(p.stdout.strip(), f"insert={bridge}")
+
+        # 4. Not injected when binary is wineserver (even with x86_64 bridge)
+        p = self.sandboxed(str(wineserver), RECLAIMER_NO_SANDBOX="1")
+        self.assertEqual(p.stdout.strip(), "insert=")
+        p = self.sandboxed(str(wineserver))
+        self.assertEqual(p.stdout.strip(), "insert=")
+
+        # 5. Caller has an arm64 dylib in environment (simulating ~/.zshenv): stripped by unset, only x86_64 bridge is injected
+        shim = self.home / "arm64_shim.dylib"
+        subprocess.run(["clang", "-arch", "arm64", "-dynamiclib", "-x", "c", "/dev/null", "-o", str(shim)], check=True)
+        p = self.sandboxed(str(wine_bin), RECLAIMER_NO_SANDBOX="1", DYLD_INSERT_LIBRARIES=str(shim))
+        self.assertEqual(p.stdout.strip(), f"insert={bridge}")
+        p = self.sandboxed(str(wine_bin), DYLD_INSERT_LIBRARIES=str(shim))
+        self.assertEqual(p.stdout.strip(), f"insert={bridge}")
+
 
 if __name__ == "__main__":
     unittest.main()

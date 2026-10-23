@@ -8,7 +8,8 @@ BASE=${BASE:A}  # (the sandbox matches real paths)
 unset DYLD_INSERT_LIBRARIES
 
 BRIDGE="$BASE/wine/Wine Staging.app/Contents/Resources/wine/lib/librumble_bridge.dylib"
-if [ "${1:t}" != "wine" ] || [ ! -f "$BRIDGE" ] || ! file -b "$BRIDGE" | grep -q x86_64; then
+SDL_LIB="${BRIDGE:h}/libSDL2-2.0.0.dylib"
+if [ "${1:t}" != "wine" ] || [ ! -f "$BRIDGE" ] || [ ! -f "$SDL_LIB" ] || ! /usr/bin/file -b "$BRIDGE" | grep -q x86_64; then
   unset BRIDGE
 fi
 

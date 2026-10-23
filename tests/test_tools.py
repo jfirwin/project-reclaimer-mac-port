@@ -851,22 +851,12 @@ class ToolsTest(unittest.TestCase):
             env = tools.game_env()
             self.assertEqual(env.get("SDL_GAMECONTROLLER_USE_BUTTON_LABELS"), "0")
 
-    def test_game_env_sets_button_labels_flag_when_nintendo_layout_fallback_exists(self):
-        spec = importlib.util.spec_from_file_location("tools", str(self.home / "game" / "tools.py"))
-        tools = importlib.util.module_from_spec(spec)
-        with mock.patch.dict(os.environ, {"RECLAIMER_HOME": str(self.home)}):
-            spec.loader.exec_module(tools)
-            (tools.BASE / "nintendo-layout").write_text("")
-            env = tools.game_env()
-            self.assertEqual(env.get("SDL_GAMECONTROLLER_USE_BUTTON_LABELS"), "0")
-
     def test_game_env_leaves_button_labels_unset_when_no_nintendo_flag(self):
         spec = importlib.util.spec_from_file_location("tools", str(self.home / "game" / "tools.py"))
         tools = importlib.util.module_from_spec(spec)
         with mock.patch.dict(os.environ, {"RECLAIMER_HOME": str(self.home)}):
             spec.loader.exec_module(tools)
             (tools.BASE / "nintendo-xbox-layout").unlink(missing_ok=True)
-            (tools.BASE / "nintendo-layout").unlink(missing_ok=True)
             env = tools.game_env()
             self.assertNotIn("SDL_GAMECONTROLLER_USE_BUTTON_LABELS", env)
 

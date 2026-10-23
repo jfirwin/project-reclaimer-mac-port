@@ -97,11 +97,6 @@ class RunTest(unittest.TestCase):
         out = self.run_game()
         self.assertIn("labels=0", out)
 
-    def test_nintendo_layout_fallback_flag_exports_use_button_labels_zero(self):
-        (self.home / "nintendo-layout").write_text("")
-        out = self.run_game()
-        self.assertIn("labels=0", out)
-
     def test_no_nintendo_layout_flag_leaves_button_labels_unset(self):
         out = self.run_game()
         self.assertIn("labels=", out)

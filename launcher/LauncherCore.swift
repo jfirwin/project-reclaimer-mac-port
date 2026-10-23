@@ -673,18 +673,15 @@ func nintendoXboxLayoutFlag(home: URL) -> URL {
 /// Whether the player has chosen the positional Xbox layout for Nintendo controllers.
 func isNintendoXboxLayout(home: URL) -> Bool {
     FileManager.default.fileExists(atPath: nintendoXboxLayoutFlag(home: home).path)
-        || FileManager.default.fileExists(atPath: home.appendingPathComponent("nintendo-layout").path)
 }
 
 /// Set or clear the positional Xbox layout flag for Nintendo controllers.
 func setNintendoXboxLayout(_ enabled: Bool, home: URL) {
     let flag = nintendoXboxLayoutFlag(home: home)
-    let alt = home.appendingPathComponent("nintendo-layout")
     if enabled {
         try? "".write(to: flag, atomically: true, encoding: .utf8)
     } else {
         try? FileManager.default.removeItem(at: flag)
-        try? FileManager.default.removeItem(at: alt)
     }
 }
 

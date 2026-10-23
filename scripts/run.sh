@@ -39,7 +39,7 @@ if [ -f "$BASE/controller-mappings.txt" ]; then
   cat "$BASE/game/gamecontrollerdb.txt" "$BASE/controller-mappings.txt" 2>/dev/null > "$DB"
 fi
 [ -s "$DB" ] && export SDL_GAMECONTROLLERCONFIG_FILE="$DB"
-[ -f "$BASE/nintendo-xbox-layout" ] || [ -f "$BASE/nintendo-layout" ] && export SDL_GAMECONTROLLER_USE_BUTTON_LABELS=0
+[ -f "$BASE/nintendo-xbox-layout" ] && export SDL_GAMECONTROLLER_USE_BUTTON_LABELS=0
 
 cd "$BASE/game" || exit 1
 # an older release the player chose for servers that haven't updated (Tools > Game version), started from its own

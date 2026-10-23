@@ -152,9 +152,11 @@ final class ControllerManager: ObservableObject {
         setNintendoXboxLayout(next, home: home)
         isNintendoPositionalLayout = next
         if next {
-            statusMessage = "Switched to Xbox Layout (Bottom=A / Jump, Right=B)."
+            statusMessage = "Switched to Xbox Layout (Bottom=A / Jump, Right=B). "
+                + "Takes effect the next time the game starts."
         } else {
-            statusMessage = "Switched to Nintendo Layout (Physical A=A, B=B)."
+            statusMessage = "Switched to Nintendo Layout (Physical A=A, B=B). "
+                + "Takes effect the next time the game starts."
         }
     }
 
@@ -1032,7 +1034,8 @@ struct ControllerSheet: View {
                                 c.toggleNintendoLayout()
                             }
                             .controlSize(.small)
-                            .help("Switch between Xbox layout (bottom=A/Jump) and printed Nintendo labels")
+                            .help("Switch between Xbox layout (bottom=A/Jump) and printed Nintendo labels, "
+                                  + "for every Nintendo controller")
                         }
                     }
                     .padding(8)

@@ -8,7 +8,7 @@ WINE_LIB="$GAMES_DIR/wine/Wine Staging.app/Contents/Resources/wine/lib"
 clang -O2 -arch x86_64 -mmacosx-version-min=14.0 -dynamiclib \
   -L"$WINE_LIB" -lSDL2 \
   -Wl,-rpath,@loader_path \
-  -framework IOKit -framework CoreFoundation -Wall -o librumble_bridge.dylib rumble_bridge.c
+  -framework IOKit -framework CoreFoundation -Wall -o librumble_bridge.dylib rumble_bridge.c drivers/8bitdo.c
 
 install_name_tool -change libSDL2.dylib @loader_path/libSDL2-2.0.0.dylib librumble_bridge.dylib
 codesign --remove-signature librumble_bridge.dylib

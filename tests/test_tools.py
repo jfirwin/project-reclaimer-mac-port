@@ -860,6 +860,24 @@ class ToolsTest(unittest.TestCase):
             env = tools.game_env()
             self.assertNotIn("SDL_GAMECONTROLLER_USE_BUTTON_LABELS", env)
 
+    def test_game_env_sets_zero_centered_devices_when_file_exists(self):
+        spec = importlib.util.spec_from_file_location("tools", str(self.home / "game" / "tools.py"))
+        tools = importlib.util.module_from_spec(spec)
+        with mock.patch.dict(os.environ, {"RECLAIMER_HOME": str(self.home)}):
+            spec.loader.exec_module(tools)
+            (tools.GAME / "zero-centered-devices.txt").write_text("0x2DC8/0x202F\n")
+            env = tools.game_env()
+            self.assertEqual(env.get("SDL_JOYSTICK_ZERO_CENTERED_DEVICES"), f"@{tools.GAME / 'zero-centered-devices.txt'}")
+
+    def test_game_env_leaves_zero_centered_devices_unset_when_file_missing(self):
+        spec = importlib.util.spec_from_file_location("tools", str(self.home / "game" / "tools.py"))
+        tools = importlib.util.module_from_spec(spec)
+        with mock.patch.dict(os.environ, {"RECLAIMER_HOME": str(self.home)}):
+            spec.loader.exec_module(tools)
+            (tools.GAME / "zero-centered-devices.txt").unlink(missing_ok=True)
+            env = tools.game_env()
+            self.assertNotIn("SDL_JOYSTICK_ZERO_CENTERED_DEVICES", env)
+
 
 if __name__ == "__main__":
     unittest.main()

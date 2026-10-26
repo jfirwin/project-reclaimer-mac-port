@@ -132,12 +132,34 @@ void my_SDL_GameControllerClose(void* controller) {
     SDL_GameControllerClose(controller);
 }
 
+typedef struct { uint8_t data[16]; } SDL_JoystickGUID;
+extern const char* SDL_GameControllerMappingForGUID(SDL_JoystickGUID guid);
+
+// shortcut: older Wine bundles SDL < 2.26 without wildcard CRC matching. Remove when Wine updates its bundled SDL2.
+const char* my_SDL_GameControllerMappingForGUID(SDL_JoystickGUID guid) {
+    const char* mapping = SDL_GameControllerMappingForGUID(guid);
+    if (!mapping) {
+        // Fallback: retry with wildcard CRC16 (0x0000) for cross-platform/bundled database entries
+        guid.data[2] = 0;
+        guid.data[3] = 0;
+        mapping = SDL_GameControllerMappingForGUID(guid);
+    }
+    if (!mapping) {
+        // Fallback: retry with wildcard version (0x0000)
+        guid.data[12] = 0;
+        guid.data[13] = 0;
+        mapping = SDL_GameControllerMappingForGUID(guid);
+    }
+    return mapping;
+}
+
 void* my_dlsym(void* handle, const char* symbol) {
     if (symbol && handle != RTLD_NEXT && handle != RTLD_SELF && strncmp(symbol, "SDL_", 4) == 0) {
         if (strcmp(symbol, "SDL_JoystickRumble") == 0) return (void*)my_SDL_JoystickRumble;
         if (strcmp(symbol, "SDL_GameControllerRumble") == 0) return (void*)my_SDL_GameControllerRumble;
         if (strcmp(symbol, "SDL_JoystickClose") == 0) return (void*)my_SDL_JoystickClose;
         if (strcmp(symbol, "SDL_GameControllerClose") == 0) return (void*)my_SDL_GameControllerClose;
+        if (strcmp(symbol, "SDL_GameControllerMappingForGUID") == 0) return (void*)my_SDL_GameControllerMappingForGUID;
     }
     return dlsym(handle, symbol);
 }
@@ -146,4 +168,5 @@ DYLD_INTERPOSE(my_SDL_JoystickRumble, SDL_JoystickRumble)
 DYLD_INTERPOSE(my_SDL_GameControllerRumble, SDL_GameControllerRumble)
 DYLD_INTERPOSE(my_SDL_JoystickClose, SDL_JoystickClose)
 DYLD_INTERPOSE(my_SDL_GameControllerClose, SDL_GameControllerClose)
+DYLD_INTERPOSE(my_SDL_GameControllerMappingForGUID, SDL_GameControllerMappingForGUID)
 DYLD_INTERPOSE(my_dlsym, dlsym)

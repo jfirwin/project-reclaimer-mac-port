@@ -153,6 +153,14 @@ const char* my_SDL_GameControllerMappingForGUID(SDL_JoystickGUID guid) {
     return mapping;
 }
 
+/*
+ * dlsym interposition:
+ * When code within Wine calls dlsym() to look up SDL symbols dynamically, redirect
+ * to our interposed functions.
+ * Passing handle == RTLD_NEXT or RTLD_SELF through untouched ensures that callers
+ * resolving symbols from within the bridge or next dynamic linker library resolve
+ * standard library symbols without circular recursion.
+ */
 void* my_dlsym(void* handle, const char* symbol) {
     if (symbol && handle != RTLD_NEXT && handle != RTLD_SELF && strncmp(symbol, "SDL_", 4) == 0) {
         if (strcmp(symbol, "SDL_JoystickRumble") == 0) return (void*)my_SDL_JoystickRumble;

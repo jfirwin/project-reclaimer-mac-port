@@ -2,8 +2,12 @@
 # Rebuild rumble/librumble_bridge.dylib for Wine on macOS.
 set -euo pipefail
 cd "$(dirname "$0")"
-GAMES_DIR="${RECLAIMER_HOME:-$HOME/Games/ProjectReclaimer}"
-WINE_LIB="$GAMES_DIR/wine/Wine Staging.app/Contents/Resources/wine/lib"
+WINE_LIB="${1:-${RECLAIMER_HOME:-$HOME/Games/ProjectReclaimer}/wine/Wine Staging.app/Contents/Resources/wine/lib}"
+if [ ! -d "$WINE_LIB" ]; then
+  echo "error: Wine lib directory not found: $WINE_LIB" >&2
+  echo "usage: $0 [path/to/wine/lib]" >&2
+  exit 1
+fi
 
 clang -O2 -arch x86_64 -mmacosx-version-min=14.0 -dynamiclib \
   -L"$WINE_LIB" -lSDL2 \

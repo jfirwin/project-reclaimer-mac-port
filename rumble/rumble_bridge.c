@@ -44,10 +44,37 @@ static inline IOHIDDeviceRef get_joystick_device(void* joystick) {
     return hwdata ? *(IOHIDDeviceRef*)hwdata : NULL;
 }
 
+#define MAX_SLOTS 4
+
+typedef struct {
+    void* joystick;
+    uint32_t generation;
+    uint8_t last_left;
+    uint8_t last_right;
+} PadState;
+
+static PadState g_pads[MAX_SLOTS];
 static pthread_mutex_t g_rumble_lock = PTHREAD_MUTEX_INITIALIZER;
-static uint32_t g_rumble_generation = 0;
-static uint8_t g_last_left = 0xFF;
-static uint8_t g_last_right = 0xFF;
+
+static PadState* get_or_create_pad(void* joystick) {
+    int first_empty = -1;
+    for (int i = 0; i < MAX_SLOTS; i++) {
+        if (g_pads[i].joystick == joystick) {
+            return &g_pads[i];
+        }
+        if (g_pads[i].joystick == NULL && first_empty < 0) {
+            first_empty = i;
+        }
+    }
+    if (first_empty >= 0) {
+        g_pads[first_empty].joystick = joystick;
+        g_pads[first_empty].generation = 0;
+        g_pads[first_empty].last_left = 0xFF;
+        g_pads[first_empty].last_right = 0xFF;
+        return &g_pads[first_empty];
+    }
+    return &g_pads[0];
+}
 
 int my_SDL_JoystickRumble(void* joystick, uint16_t low, uint16_t high, uint32_t duration_ms) {
     if (!joystick) return -1;
@@ -64,12 +91,13 @@ int my_SDL_JoystickRumble(void* joystick, uint16_t low, uint16_t high, uint32_t 
         uint8_t right = (uint8_t)(high >> 8);
 
         pthread_mutex_lock(&g_rumble_lock);
-        uint32_t current_gen = ++g_rumble_generation;
+        PadState* pad = get_or_create_pad(joystick);
+        uint32_t current_gen = ++pad->generation;
 
         if (left == 0 && right == 0) {
-            int changed = (g_last_left != 0 || g_last_right != 0);
-            g_last_left = 0;
-            g_last_right = 0;
+            int changed = (pad->last_left != 0 || pad->last_right != 0);
+            pad->last_left = 0;
+            pad->last_right = 0;
             pthread_mutex_unlock(&g_rumble_lock);
             if (changed) {
                 driver->send_rumble(dev, 0, 0);
@@ -77,13 +105,13 @@ int my_SDL_JoystickRumble(void* joystick, uint16_t low, uint16_t high, uint32_t 
             return 0;
         }
 
-        if (left == g_last_left && right == g_last_right) {
+        if (left == pad->last_left && right == pad->last_right) {
             pthread_mutex_unlock(&g_rumble_lock);
             return 0;
         }
 
-        g_last_left = left;
-        g_last_right = right;
+        pad->last_left = left;
+        pad->last_right = right;
         pthread_mutex_unlock(&g_rumble_lock);
 
         driver->send_rumble(dev, left, right);
@@ -93,9 +121,9 @@ int my_SDL_JoystickRumble(void* joystick, uint16_t low, uint16_t high, uint32_t 
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)duration_ms * NSEC_PER_MSEC),
                            dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
                 pthread_mutex_lock(&g_rumble_lock);
-                if (g_rumble_generation == current_gen) {
-                    g_last_left = 0;
-                    g_last_right = 0;
+                if (pad->joystick == joystick && pad->generation == current_gen) {
+                    pad->last_left = 0;
+                    pad->last_right = 0;
                     pthread_mutex_unlock(&g_rumble_lock);
                     driver->send_rumble(dev, 0, 0);
                 } else {
@@ -117,18 +145,37 @@ int my_SDL_GameControllerRumble(void* controller, uint16_t low, uint16_t high, u
 }
 
 void my_SDL_JoystickClose(void* joystick) {
-    pthread_mutex_lock(&g_rumble_lock);
-    g_last_left = 0xFF;
-    g_last_right = 0xFF;
-    pthread_mutex_unlock(&g_rumble_lock);
+    if (joystick) {
+        pthread_mutex_lock(&g_rumble_lock);
+        for (int i = 0; i < MAX_SLOTS; i++) {
+            if (g_pads[i].joystick == joystick) {
+                g_pads[i].joystick = NULL;
+                g_pads[i].last_left = 0xFF;
+                g_pads[i].last_right = 0xFF;
+                g_pads[i].generation = 0;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&g_rumble_lock);
+    }
     SDL_JoystickClose(joystick);
 }
 
 void my_SDL_GameControllerClose(void* controller) {
-    pthread_mutex_lock(&g_rumble_lock);
-    g_last_left = 0xFF;
-    g_last_right = 0xFF;
-    pthread_mutex_unlock(&g_rumble_lock);
+    void* joy = controller ? SDL_GameControllerGetJoystick(controller) : NULL;
+    if (joy) {
+        pthread_mutex_lock(&g_rumble_lock);
+        for (int i = 0; i < MAX_SLOTS; i++) {
+            if (g_pads[i].joystick == joy) {
+                g_pads[i].joystick = NULL;
+                g_pads[i].last_left = 0xFF;
+                g_pads[i].last_right = 0xFF;
+                g_pads[i].generation = 0;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&g_rumble_lock);
+    }
     SDL_GameControllerClose(controller);
 }
 

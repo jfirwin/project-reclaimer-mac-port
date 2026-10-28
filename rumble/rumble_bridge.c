@@ -27,7 +27,17 @@
    __attribute__((used)) static struct{ const void* replacement; const void* replacee; } _interpose_##_replacee \
             __attribute__ ((section ("__DATA,__interpose"))) = { (const void*)(unsigned long)&_replacement, (const void*)(unsigned long)&_replacee };
 
+typedef struct {
+    uint8_t major;
+    uint8_t minor;
+    uint8_t patch;
+} SDL_version;
+
 // Forward declarations for SDL2 functions
+extern void SDL_GetVersion(SDL_version* ver);
+extern const char* SDL_GetPlatform(void);
+extern void SDL_LockJoysticks(void);
+extern void SDL_UnlockJoysticks(void);
 extern uint16_t SDL_JoystickGetVendor(void* joystick);
 extern uint16_t SDL_JoystickGetProduct(void* joystick);
 extern void* SDL_GameControllerGetJoystick(void* controller);
@@ -36,12 +46,26 @@ extern void SDL_GameControllerClose(void* controller);
 extern int SDL_JoystickRumble(void* joystick, uint16_t low, uint16_t high, uint32_t duration_ms);
 extern int SDL_GameControllerRumble(void* controller, uint16_t low, uint16_t high, uint32_t duration_ms);
 
-// ponytail: in SDL2 on Darwin, joystick->hwdata is at offset 0xe0, and its first field is IOHIDDeviceRef.
-// Pulling deviceRef directly from SDL guarantees we always use the live, connected handle SDL is reading from.
+// ponytail: in SDL2 on Darwin x86_64, joystick->hwdata is at offset 0xe0, and its first field is IOHIDDeviceRef.
+// Verify SDL runtime version (major == 2 on Mac OS X) before trusting the offset, and read under SDL's joystick lock.
 static inline IOHIDDeviceRef get_joystick_device(void* joystick) {
     if (!joystick) return NULL;
+
+    static int s_verified = -1;
+    if (s_verified < 0) {
+        SDL_version ver;
+        SDL_GetVersion(&ver);
+        const char* plat = SDL_GetPlatform();
+        s_verified = (ver.major == 2 && plat && strcmp(plat, "Mac OS X") == 0) ? 1 : 0;
+    }
+    if (!s_verified) return NULL;
+
+    SDL_LockJoysticks();
     void* hwdata = *(void**)((char*)joystick + 0xe0);
-    return hwdata ? *(IOHIDDeviceRef*)hwdata : NULL;
+    IOHIDDeviceRef dev = hwdata ? *(IOHIDDeviceRef*)hwdata : NULL;
+    SDL_UnlockJoysticks();
+
+    return dev;
 }
 
 #define MAX_SLOTS 4

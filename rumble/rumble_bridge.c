@@ -47,7 +47,7 @@ extern int SDL_JoystickRumble(void* joystick, uint16_t low, uint16_t high, uint3
 extern int SDL_GameControllerRumble(void* controller, uint16_t low, uint16_t high, uint32_t duration_ms);
 
 // ponytail: in SDL2 on Darwin x86_64, joystick->hwdata is at offset 0xe0, and its first field is IOHIDDeviceRef.
-// Verify SDL runtime version (major == 2 on Mac OS X) before trusting the offset, and read under SDL's joystick lock.
+// Verify the exact SDL runtime version (2.32.8 on Mac OS X) shipped with Wine before trusting the offset.
 static inline IOHIDDeviceRef get_joystick_device(void* joystick) {
     if (!joystick) return NULL;
 
@@ -56,7 +56,7 @@ static inline IOHIDDeviceRef get_joystick_device(void* joystick) {
         SDL_version ver;
         SDL_GetVersion(&ver);
         const char* plat = SDL_GetPlatform();
-        s_verified = (ver.major == 2 && plat && strcmp(plat, "Mac OS X") == 0) ? 1 : 0;
+        s_verified = (ver.major == 2 && ver.minor == 32 && ver.patch == 8 && plat && strcmp(plat, "Mac OS X") == 0) ? 1 : 0;
     }
     if (!s_verified) return NULL;
 

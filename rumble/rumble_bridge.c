@@ -70,6 +70,9 @@ static inline IOHIDDeviceRef get_joystick_device(void* joystick) {
     SDL_LockJoysticks();
     void* hwdata = *(void**)((char*)joystick + 0xe0);
     IOHIDDeviceRef dev = hwdata ? *(IOHIDDeviceRef*)hwdata : NULL;
+    if (dev) {
+        CFRetain(dev);
+    }
     SDL_UnlockJoysticks();
 
     return dev;
@@ -133,11 +136,13 @@ int my_SDL_JoystickRumble(void* joystick, uint16_t low, uint16_t high, uint32_t 
             if (changed) {
                 driver->send_rumble(dev, 0, 0);
             }
+            CFRelease(dev);
             return 0;
         }
 
         if (left == pad->last_left && right == pad->last_right) {
             pthread_mutex_unlock(&g_rumble_lock);
+            CFRelease(dev);
             return 0;
         }
 
@@ -148,7 +153,7 @@ int my_SDL_JoystickRumble(void* joystick, uint16_t low, uint16_t high, uint32_t 
         driver->send_rumble(dev, left, right);
 
         if (duration_ms > 0) {
-            CFRetain(dev);
+            // dev was retained under SDL_LockJoysticks in get_joystick_device; transfer reference to timer block
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)duration_ms * NSEC_PER_MSEC),
                            dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
                 pthread_mutex_lock(&g_rumble_lock);
@@ -162,6 +167,8 @@ int my_SDL_JoystickRumble(void* joystick, uint16_t low, uint16_t high, uint32_t 
                 }
                 CFRelease(dev);
             });
+        } else {
+            CFRelease(dev);
         }
         return 0;
     }

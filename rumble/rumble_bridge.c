@@ -33,11 +33,14 @@ typedef struct {
     uint8_t patch;
 } SDL_version;
 
+typedef struct { uint8_t data[16]; } SDL_JoystickGUID;
+
 // Forward declarations for SDL2 functions
 extern void SDL_GetVersion(SDL_version* ver);
 extern const char* SDL_GetPlatform(void);
 extern void SDL_LockJoysticks(void);
 extern void SDL_UnlockJoysticks(void);
+extern SDL_JoystickGUID SDL_JoystickGetGUID(void* joystick);
 extern uint16_t SDL_JoystickGetVendor(void* joystick);
 extern uint16_t SDL_JoystickGetProduct(void* joystick);
 extern void* SDL_GameControllerGetJoystick(void* controller);
@@ -47,7 +50,7 @@ extern int SDL_JoystickRumble(void* joystick, uint16_t low, uint16_t high, uint3
 extern int SDL_GameControllerRumble(void* controller, uint16_t low, uint16_t high, uint32_t duration_ms);
 
 // ponytail: in SDL2 on Darwin x86_64, joystick->hwdata is at offset 0xe0, and its first field is IOHIDDeviceRef.
-// Verify the exact SDL runtime version (2.32.8 on Mac OS X) shipped with Wine before trusting the offset.
+// Verify the exact SDL runtime version (2.32.8 on Mac OS X) and IOKit backend (GUID driver byte 14 == 0) before reading offset.
 static inline IOHIDDeviceRef get_joystick_device(void* joystick) {
     if (!joystick) return NULL;
 
@@ -59,6 +62,10 @@ static inline IOHIDDeviceRef get_joystick_device(void* joystick) {
         s_verified = (ver.major == 2 && ver.minor == 32 && ver.patch == 8 && plat && strcmp(plat, "Mac OS X") == 0) ? 1 : 0;
     }
     if (!s_verified) return NULL;
+
+    // Verify backend: byte 14 is the driver signature (0 = IOKit, 'h' = HIDAPI, 'm' = MFi)
+    SDL_JoystickGUID guid = SDL_JoystickGetGUID(joystick);
+    if (guid.data[14] != 0) return NULL;
 
     SDL_LockJoysticks();
     void* hwdata = *(void**)((char*)joystick + 0xe0);

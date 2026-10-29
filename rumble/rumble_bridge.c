@@ -102,12 +102,11 @@ static PadState* get_or_create_pad(void* joystick) {
     }
     if (first_empty >= 0) {
         g_pads[first_empty].joystick = joystick;
-        g_pads[first_empty].generation = 0;
         g_pads[first_empty].last_left = 0xFF;
         g_pads[first_empty].last_right = 0xFF;
         return &g_pads[first_empty];
     }
-    return &g_pads[0];
+    return NULL;
 }
 
 int my_SDL_JoystickRumble(void* joystick, uint16_t low, uint16_t high, uint32_t duration_ms) {
@@ -126,6 +125,12 @@ int my_SDL_JoystickRumble(void* joystick, uint16_t low, uint16_t high, uint32_t 
 
         pthread_mutex_lock(&g_rumble_lock);
         PadState* pad = get_or_create_pad(joystick);
+        if (!pad) {
+            pthread_mutex_unlock(&g_rumble_lock);
+            CFRelease(dev);
+            return 0;
+        }
+
         uint32_t current_gen = ++pad->generation;
 
         if (left == 0 && right == 0) {
@@ -190,7 +195,7 @@ void my_SDL_JoystickClose(void* joystick) {
                 g_pads[i].joystick = NULL;
                 g_pads[i].last_left = 0xFF;
                 g_pads[i].last_right = 0xFF;
-                g_pads[i].generation = 0;
+                g_pads[i].generation++;
                 break;
             }
         }
@@ -208,7 +213,7 @@ void my_SDL_GameControllerClose(void* controller) {
                 g_pads[i].joystick = NULL;
                 g_pads[i].last_left = 0xFF;
                 g_pads[i].last_right = 0xFF;
-                g_pads[i].generation = 0;
+                g_pads[i].generation++;
                 break;
             }
         }
